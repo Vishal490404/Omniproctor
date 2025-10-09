@@ -1,0 +1,70 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id       Int        @id
+  name     String
+  branch   String
+  image    String
+
+  userTests UserTest[]
+}
+
+model Admin {
+  id        Int     @id @default(autoincrement())
+  email     String  @unique
+  name      String
+  password  String
+
+  tests     Test[]
+}
+
+model Test {
+  id        Int       @id @default(autoincrement())
+  adminId   Int
+  url       String
+  name      String
+  date      DateTime
+  time      String
+  isActive  Boolean   @default(false)
+
+  admin     Admin     @relation(fields: [adminId], references: [id])
+  userTests UserTest[]
+}
+
+model UserTest {
+  id           Int         @id @default(autoincrement())
+  userId       Int
+  testId       Int
+  userLocation String
+  image        String
+  recording    String?
+
+  user         User         @relation(fields: [userId], references: [id])
+  test         Test         @relation(fields: [testId], references: [id])
+  activities   Activity[]
+  @@unique([userId, testId])
+}
+
+model Activity {
+  id          Int      @id @default(autoincrement())
+  userTestId  Int
+  timeIssue   DateTime
+  type        String[]     // Array of types, e.g. ["WARNING", "ALERT"]
+  screenshot  String?
+  metadata    Json?
+
+  userTest    UserTest  @relation(fields: [userTestId], references: [id])
+}
