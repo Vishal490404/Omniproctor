@@ -1,14 +1,56 @@
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
+import axios from "axios";
+import { useEffect, useState } from "react";
 import Navbar from "../components/Navbar";
 import { FiClipboard, FiPlusCircle } from "react-icons/fi";
 
 const Dashboard = () => {
-  const stats = {
-    activeTests: 12,
-    totalUsers: 146,
-    pendingReviews: 4,
+  const [activeTestCount, setActiveTestCount] = useState(0);
+  const [totalUsers, setTotalUsers] = useState(0);
+  const [adminName, setAdminName] = useState("");
+
+  useEffect(() => {
+    const storedAdmin = localStorage.getItem("admin");
+    if (storedAdmin) {
+      const parsedAdmin = JSON.parse(storedAdmin);
+      setAdminName(parsedAdmin.name);
+    }
+  }, []);
+
+  const getActiveTestCount = async () => {
+    try {
+      const response = await axios.get(
+        "http://localhost:5000/api/tests/activeTestsCnt"
+      );
+      return response.data.count;
+    } catch (error) {
+      console.error("Error fetching active test count:", error);
+      return 0;
+    }
   };
+
+  useEffect(() => {
+  const fetchData = async () => {
+    try {
+      const response = await axios.get("http://localhost:3000/api/users/count");
+      setTotalUsers(response.data.count);
+      console.log("Total users fetched:", response.data.count);
+    } catch (error) {
+      console.error("Error fetching total users:", error);
+      setTotalUsers(0);
+    }
+  };
+  fetchData();
+}, []);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      const count = await getActiveTestCount();
+      setActiveTestCount(count);
+    };
+    fetchData();
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-indigo-50 to-slate-100">
@@ -25,16 +67,16 @@ const Dashboard = () => {
         >
           👋 Welcome back,{" "}
           <span className="bg-gradient-to-r from-indigo-500 to-purple-500 bg-clip-text text-transparent">
-            Admin
+            {adminName || "Admin"}
           </span>
         </motion.h2>
 
         {/* Stats Overview */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-10">
           {[
-            { label: "Active Tests", value: stats.activeTests },
-            { label: "Total Users", value: stats.totalUsers },
-            { label: "Pending Reviews", value: stats.pendingReviews },
+            { label: "Active Tests", value: activeTestCount },
+            { label: "Total Users", value: totalUsers },
+            { label: "Pending Reviews", value: "12" },
           ].map((item, idx) => (
             <motion.div
               key={idx}

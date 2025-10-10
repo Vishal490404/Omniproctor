@@ -12,6 +12,11 @@ app.use(cors());
 //Routes
 
 app.use("/auth", authRoutes);
+app.use("/api/admins", require("./routes/adminRoutes"));
+app.use("/api/users", require("./routes/userRoutes"));
+app.use("/api/tests", require("./routes/testRoutes"));
+app.use("/api/userTests", require("./routes/userTestRoutes"));
+app.use("/api/activities", require("./routes/activityRoutes"));
 
 app.get("/", (req, res)=>{
     res.send("Server is running");

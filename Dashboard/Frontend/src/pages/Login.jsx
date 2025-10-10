@@ -3,6 +3,7 @@ import { useState } from "react";
 import axios from "axios";
 import Input from "../components/Input";
 import Button from "../components/Button";
+import { useNavigate } from 'react-router-dom'
 import { motion } from "framer-motion";
 
 const Login = () => {
@@ -10,6 +11,8 @@ const Login = () => {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
+
+  const navigate = useNavigate();
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -25,7 +28,10 @@ const Login = () => {
 
       if (res.data.message === "success") {
         setMessage("Login successful!");
-        // You can navigate or store token here
+        localStorage.setItem("token", res.data.token);
+        localStorage.setItem("adminId", res.data.admin.id);
+        localStorage.setItem("adminName", res.data.admin.name);
+        navigate("/dashboard");
       } else {
         setMessage(res.data.error || "Invalid credentials");
       }
