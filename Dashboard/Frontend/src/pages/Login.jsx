@@ -28,6 +28,7 @@ const Login = () => {
 
       if (res.data.message === "success") {
         setMessage("Login successful!");
+        console.log(res.data.admin.id);
         localStorage.setItem("token", res.data.token);
         localStorage.setItem("adminId", res.data.admin.id);
         localStorage.setItem("adminName", res.data.admin.name);

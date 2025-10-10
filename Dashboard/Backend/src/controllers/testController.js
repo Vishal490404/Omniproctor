@@ -78,3 +78,56 @@ exports.getActiveTestCount = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// Get all active tests for a specific admin
+exports.getActiveTestsByAdmin = async (req, res) => {
+  try {
+    const { adminId } = req.params; // assuming adminId is passed in the URL
+
+    if (!adminId) {
+      return res.status(400).json({ error: "Admin ID is required" });
+    }
+
+    const activeTests = await prisma.test.findMany({
+      where: {
+        isActive: true,
+        adminId: parseInt(adminId) // convert to number if it's stored as int
+      },
+      include: {
+        admin: {
+          select: { id: true, name: true, email: true }
+        },
+        userTests: true
+      }
+    });
+
+    res.json(activeTests);
+  } catch (err) {
+    console.error("Error fetching active tests by admin:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Get all users for a specific test
+exports.getUsersByTestId = async (req, res) => {
+  try {
+    const { testId } = req.params;
+
+    // Find all UserTest entries for this test
+    const userTests = await prisma.userTest.findMany({
+      where: { testId: parseInt(testId) },
+      include: { 
+        user: true // Include user info
+      }
+    });
+
+    // Extract only user info
+    const users = userTests.map(ut => ut.user);
+
+    res.json({ users });
+  } catch (err) {
+    console.error("Error fetching users for test:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+

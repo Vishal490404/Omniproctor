@@ -8,32 +8,27 @@ import { FiClipboard, FiPlusCircle } from "react-icons/fi";
 const Dashboard = () => {
   const [activeTestCount, setActiveTestCount] = useState(0);
   const [totalUsers, setTotalUsers] = useState(0);
-  const [adminName, setAdminName] = useState("");
-
-  useEffect(() => {
-    const storedAdmin = localStorage.getItem("admin");
-    if (storedAdmin) {
-      const parsedAdmin = JSON.parse(storedAdmin);
-      setAdminName(parsedAdmin.name);
-    }
-  }, []);
+  const adminName = localStorage.getItem("adminName");
+  const adminId = localStorage.getItem("adminId");
 
   const getActiveTestCount = async () => {
     try {
-      const response = await axios.get(
-        "http://localhost:5000/api/tests/activeTestsCnt"
-      );
-      return response.data.count;
+      const response = await axios.get(`http://localhost:3000/api/tests/active/${adminId}`);
+      setActiveTestCount(response.data.length);
     } catch (error) {
       console.error("Error fetching active test count:", error);
-      return 0;
+      setActiveTestCount(0);
     }
   };
 
   useEffect(() => {
-  const fetchData = async () => {
-    try {
-      const response = await axios.get("http://localhost:3000/api/users/count");
+    getActiveTestCount();
+  }, []);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const response = await axios.get("http://localhost:3000/api/users/count");
       setTotalUsers(response.data.count);
       console.log("Total users fetched:", response.data.count);
     } catch (error) {
@@ -43,14 +38,6 @@ const Dashboard = () => {
   };
   fetchData();
 }, []);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      const count = await getActiveTestCount();
-      setActiveTestCount(count);
-    };
-    fetchData();
-  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-indigo-50 to-slate-100">
@@ -75,7 +62,6 @@ const Dashboard = () => {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-10">
           {[
             { label: "Active Tests", value: activeTestCount },
-            { label: "Total Users", value: totalUsers },
             { label: "Pending Reviews", value: "12" },
           ].map((item, idx) => (
             <motion.div

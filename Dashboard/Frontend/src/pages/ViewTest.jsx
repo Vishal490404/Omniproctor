@@ -11,25 +11,23 @@ const ViewTest = () => {
 
   const [testInfo, setTestInfo] = useState({});
   const [users, setUsers] = useState([]);
-  const [alerts, setAlerts] = useState([]);
+  // const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    // =============================
-    // Backend Integration (Axios)
-    // =============================
-    /*
     const fetchTestData = async () => {
       try {
-        const [testRes, userRes, alertRes] = await Promise.all([
-          axios.get(`/api/tests/${id}`),
-          axios.get(`/api/tests/${id}/users`),
-          axios.get(`/api/tests/${id}/alerts`)
+        const [testRes, userRes] = await Promise.all([
+          axios.get(`http://localhost:3000/api/tests/${id}`),
+          axios.get(`http://localhost:3000/api/tests/${id}/users`),
+          // axios.get(`/api/tests/${id}/alerts`)
         ]);
         setTestInfo(testRes.data);
-        setUsers(userRes.data);
-        setAlerts(alertRes.data);
+        setUsers(userRes.data.users);
+        console.log("Fetched users:", userRes.data.users);
+        console.log("Fetched test info:", testRes.data);
+        // setAlerts(alertRes.data);
       } catch (err) {
         console.error("Error fetching test data:", err);
         setError("Failed to load test details. Please try again later.");
@@ -38,29 +36,10 @@ const ViewTest = () => {
       }
     };
     fetchTestData();
-    */
-
-    // =============================
-    // Dummy Data for UI Showcase
-    // =============================
-    setTimeout(() => {
-      setTestInfo({ id, name: "Frontend Assessment", date: "2025-10-08", duration: "60 mins" });
-      setUsers([
-        { name: "John Doe", score: 85 },
-        { name: "Jane Smith", score: 78 },
-        { name: "Alice Johnson", score: 92 },
-      ]);
-      setAlerts([
-        { id: 1, user: "John Doe", type: "Multiple Face Detected", time: "12:23 PM", severity: "High" },
-        { id: 2, user: "John Doe", type: "Tab Switch Detected", time: "12:30 PM", severity: "Medium" },
-        { id: 3, user: "Jane Smith", type: "Tab Switch Detected", time: "12:40 PM", severity: "Medium" },
-        { id: 4, user: "Alice Johnson", type: "No Malpractice", time: "12:50 PM", severity: "Low" },
-      ]);
-      setLoading(false);
-    }, 1000);
   }, [id]);
 
-  const handleShortlist = (userName) => alert(`${userName} has been shortlisted!`);
+  const handleShortlist = (userName) =>
+    alert(`${userName} has been shortlisted!`);
   const handleReject = (userName) => alert(`${userName} has been rejected!`);
 
   if (loading)
@@ -72,7 +51,9 @@ const ViewTest = () => {
 
   if (error)
     return (
-      <div className="flex justify-center items-center h-screen text-red-500 font-medium">{error}</div>
+      <div className="flex justify-center items-center h-screen text-red-500 font-medium">
+        {error}
+      </div>
     );
 
   // Color mapping for severity (modern soft colors)
@@ -87,23 +68,32 @@ const ViewTest = () => {
       <Navbar />
       <div className="max-w-6xl mx-auto px-6 py-10">
         {/* Test Header */}
-        <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="mb-10 text-center">
-          <h2 className="text-3xl font-bold text-gray-800 mb-2">{testInfo.name}</h2>
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="mb-10 text-center"
+        >
+          <h2 className="text-3xl font-bold text-gray-800 mb-2">
+            {testInfo.name}
+          </h2>
           <p className="text-gray-600">
-            Test ID: <span className="font-medium text-gray-700">{testInfo.id}</span> • Date: {testInfo.date} • Duration: {testInfo.duration}
+            Test ID:{" "}
+            <span className="font-medium text-gray-700">{testInfo.id}</span> •
+            Date: {testInfo.date} • Duration: {testInfo.duration}
           </p>
         </motion.div>
 
-        {/* Participants with Alerts */}
         {users.map((user) => {
-          const userAlerts = alerts.filter((a) => a.user === user.name);
+          // const userAlerts = alerts.filter((a) => a.user === user.name);
+
           return (
-            <div key={user.name} className="mb-8">
+            <div key={user.id} className="mb-8">
               {/* Participant Card */}
               <UserCard user={user} />
 
               {/* Participant Alerts */}
-              {userAlerts.length > 0 ? (
+              {/* {userAlerts.length > 0 ? (
                 <div className="mt-3 space-y-3">
                   {userAlerts.map((alert, index) => (
                     <motion.div
@@ -111,23 +101,37 @@ const ViewTest = () => {
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: index * 0.05 }}
-                      className={`flex flex-col sm:flex-row justify-between items-start sm:items-center p-4 rounded-lg shadow-md bg-white border-l-4 `}
+                      className={`flex flex-col sm:flex-row justify-between items-start sm:items-center p-4 rounded-lg shadow-md bg-white border-l-4`}
                     >
                       <div className="flex-1 flex items-center gap-2 mb-2 sm:mb-0">
                         <FiAlertTriangle className="text-gray-400 w-5 h-5" />
                         <div>
-                          <p className="text-sm text-gray-500 mb-0.5">{alert.time}</p>
-                          <p className="font-medium text-gray-800">{alert.type}</p>
+                          <p className="text-sm text-gray-500 mb-0.5">
+                            {alert.time}
+                          </p>
+                          <p className="font-medium text-gray-800">
+                            {alert.type}
+                          </p>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className={`inline-block px-3 py-1 text-xs font-semibold rounded-full ${severityColors[alert.severity]}`}>
+                        <span
+                          className={`inline-block px-3 py-1 text-xs font-semibold rounded-full ${
+                            severityColors[alert.severity]
+                          }`}
+                        >
                           {alert.severity} Severity
                         </span>
-                        <button onClick={() => handleShortlist(alert.user)} className="bg-green-500 text-white px-3 py-1 rounded-lg hover:bg-green-600 transition flex items-center gap-1">
+                        <button
+                          onClick={() => handleShortlist(alert.user)}
+                          className="bg-green-500 text-white px-3 py-1 rounded-lg hover:bg-green-600 transition flex items-center gap-1"
+                        >
                           <FiCheckCircle /> Shortlist
                         </button>
-                        <button onClick={() => handleReject(alert.user)} className="bg-red-500 text-white px-3 py-1 rounded-lg hover:bg-red-600 transition flex items-center gap-1">
+                        <button
+                          onClick={() => handleReject(alert.user)}
+                          className="bg-red-500 text-white px-3 py-1 rounded-lg hover:bg-red-600 transition flex items-center gap-1"
+                        >
                           <FiXCircle /> Reject
                         </button>
                       </div>
@@ -135,8 +139,10 @@ const ViewTest = () => {
                   ))}
                 </div>
               ) : (
-                <div className="mt-2 text-gray-500 italic">No alerts for this participant.</div>
-              )}
+                <div className="mt-2 text-gray-500 italic">
+                  No alerts for this participant.
+                </div>
+              )} */}
             </div>
           );
         })}

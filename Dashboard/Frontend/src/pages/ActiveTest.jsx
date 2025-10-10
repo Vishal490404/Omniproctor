@@ -2,21 +2,18 @@ import { useEffect, useState } from "react";
 import Navbar from "../components/Navbar";
 import TestCard from "../components/TestCard";
 import { motion } from "framer-motion";
-// import axios from "axios"; // Uncomment when backend is ready
+import axios from "axios";
 
 const ActiveTests = () => {
   const [tests, setTests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const adminId = localStorage.getItem("adminId");
 
   useEffect(() => {
-    // 🧩 Backend call placeholder
-    // Uncomment and configure when API is ready
-    /*
     const fetchTests = async () => {
       try {
-        const response = await axios.get("/api/tests/active"); 
-        // Replace with your real backend endpoint
+        const response = await axios.get(`http://localhost:3000/api/tests/active/${adminId}`);
         setTests(response.data || []);
       } catch (err) {
         console.error("Error fetching tests:", err);
@@ -27,17 +24,6 @@ const ActiveTests = () => {
     };
 
     fetchTests();
-    */
-
-    // 🧪 Dummy data for UI showcase
-    setTimeout(() => {
-      setTests([
-        { id: 1, name: "Frontend Assessment" },
-        { id: 2, name: "Backend Challenge" },
-        { id: 3, name: "System Design Quiz" },
-      ]);
-      setLoading(false);
-    }, 1000);
   }, []);
 
   return (
@@ -55,9 +41,6 @@ const ActiveTests = () => {
           <h2 className="text-3xl font-semibold text-slate-800 tracking-tight">
             Active Tests
           </h2>
-          <button className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-5 py-2 rounded-lg shadow-md transition-all duration-300">
-            + New Test
-          </button>
         </motion.div>
 
         {/* Loading State */}
