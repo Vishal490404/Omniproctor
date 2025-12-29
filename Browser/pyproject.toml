@@ -1,0 +1,19 @@
+[project]
+name = "omniproctor-client"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "interception>=0.6.0",
+    "keyboard>=0.13.5",
+    "psutil>=7.1.0",
+    "pycryptodome>=3.23.0",
+    "pydantic>=2.12.2",
+    "pyqt6>=6.10.0",
+    "pyqt6-webengine>=6.10.0",
+    "pyuac>=0.0.3",
+    "pywin32>=311",
+    "requests>=2.32.5",
+    "ruff>=0.14.0",
+]
