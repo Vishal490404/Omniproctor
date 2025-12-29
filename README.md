@@ -1,7 +1,6 @@
 # Welcome to Omniproctor
 
-!!! info "Project Status"
-    This project is currently a **Work In Progress (WIP)**. Features and documentation are actively being developed and improved.
+This project is currently a **Work In Progress (WIP)**. Features and documentation are actively being developed and improved.
 
 ## Overview
 
@@ -43,11 +42,6 @@ A full-stack web application consisting of:
     - Administrator privileges (for firewall control)
     - **SimpleWall must be installed before setting up the browser** (for network restrictions)
     (This will be removed in future update and the browser will not depend on any external firewall)
-
-!!! warning "SimpleWall Required (Temporary Workaround)"
-    The browser application currently requires [SimpleWall](https://www.simplewall.org/) to be installed and configured on your system.
-
-    **Why?** Due to time constraints and the complexity of implementing custom Windows Filtering Platform (WFP) drivers, we are using SimpleWall as a temporary solution for network isolation. This external dependency will be removed and replaced with native firewall rules in future updates.
 
 - **For Dashboard**:
     - Node.js 16 or higher
@@ -123,7 +117,6 @@ Omniproctor/
 
 ## Rules and Guidelines
 
-!!! warning "Important Rules"
     - The browser must be launched with administrator privileges for full security features
     - Ensure stable internet connection before starting a test
     - Report any technical issues immediately to administrators
