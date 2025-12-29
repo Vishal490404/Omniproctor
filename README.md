@@ -117,9 +117,9 @@ Omniproctor/
 
 ## Rules and Guidelines
 
-    - The browser must be launched with administrator privileges for full security features
-    - Ensure stable internet connection before starting a test
-    - Report any technical issues immediately to administrators
+- The browser must be launched with administrator privileges for full security features
+- Ensure stable internet connection before starting a test
+- Report any technical issues immediately to administrators
 
 ## Support
 
