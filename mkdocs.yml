@@ -1,0 +1,32 @@
+site_name: Omniproctor
+site_description: Online Assessments Browser
+site_author: Vishal Desai
+
+theme:
+  name: readthedocs
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_div_format
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - attr_list
+  - md_in_html
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Project Challenges: project_challenges.md
+
+extra_javascript:
+  - https://unpkg.com/mermaid/dist/mermaid.min.js
