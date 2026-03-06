@@ -14,7 +14,7 @@ graph TD
         A[Student] -->|Joins Classroom| H[Web Dashboard]
         A -->|Launches Test| H
         H -.->|Redirects to| B[Secure Browser App]
-        B -->|Loads| Ext[External Test Link\ne.g. HackerRank]
+        B -->|Loads| Ext[External Test Link e.g. HackerRank]
         B -->|Enforces| OS[OS-Level Security]
         OS -->|Blocks| SS[Screen Sharing]
         OS -->|Blocks| TS[Task Switching]
