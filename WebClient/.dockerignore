@@ -1,0 +1,40 @@
+# Python virtual envs - never ship into image (also fixes "invalid file request"
+# on Windows when the host venv contains symlinks pointing to OS-specific paths)
+.venv
+venv
+env
+
+# Python bytecode / caches
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Frontend - built and served separately, huge node_modules
+frontend
+node_modules
+
+# Local secrets and dev databases
+.env
+*.sqlite
+*.db
+postgres-data
+
+# IDE / OS
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Git / docs
+.git
+.gitignore
+README.md
+*.md
+
+# Docker meta - no need to copy into context
+Dockerfile
+docker-compose.yml
+.dockerignore

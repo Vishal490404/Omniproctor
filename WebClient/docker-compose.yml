@@ -27,13 +27,19 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://omniproctor:omniproctor@db:5432/omniproctor
+      # Cross-filesystem bind mounts can't hardlink; stop uv from warning.
+      UV_LINK_MODE: copy
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "8001:8000"
+    # Only mount the source so the in-image /app/.venv survives. Mounting the
+    # whole repo would replace /app entirely, wiping the venv built during
+    # `docker build` and forcing `uv sync` to re-run on every container start
+    # (and breaking on Windows because the host .venv contains macOS symlinks).
     volumes:
-      - ./:/app
+      - ./app:/app/app
 
 volumes:
   webclient_pgdata:
