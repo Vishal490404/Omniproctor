@@ -1,5 +1,7 @@
+import atexit
 import ctypes
 import keyboard
+import signal
 import winreg
 
 
@@ -10,6 +12,7 @@ class KioskModeKeyBlocker:
         self.running = False
         self.active_hotkeys = []
         self._gestures_suppressed = False
+        self.system_lockdown = True
 
     def setup_keyboard_hooks(self):
         if not self.blocked:
@@ -158,14 +161,14 @@ class KioskModeKeyBlocker:
 
     def disable_task_manager(self):
         try:
-            key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Policies\System"
             try:
                 key = winreg.CreateKeyEx(
-                    winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE)
+                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
                 winreg.SetValueEx(key, "DisableTaskMgr",
                                   0, winreg.REG_DWORD, 1)
                 winreg.CloseKey(key)
-                print("Task Manager disabled via registry (system-wide)")
+                print("Task Manager disabled via registry (current user only)")
                 return True
             except PermissionError:
                 return False
@@ -177,14 +180,14 @@ class KioskModeKeyBlocker:
         success = False
         try:
 
-            key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Policies\System"
 
             try:
                 key = winreg.OpenKey(
-                    winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE)
+                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
                 try:
                     winreg.DeleteValue(key, "DisableTaskMgr")
-                    print("Task Manager re-enabled via registry (system-wide)")
+                    print("Task Manager re-enabled via registry (current user only)")
                     success = True
                 except FileNotFoundError:
                     pass
@@ -229,8 +232,8 @@ class KioskModeKeyBlocker:
     @staticmethod
     def _set_edge_swipe_policy(disabled: bool) -> None:
         """Control edge swipe gestures (Action Center / Notifications).
-        Sets HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\EdgeUI
-              AllowEdgeSwipe = 0 (disable) or deletes it (enable).
+        This is a Group Policy that only takes effect under HKLM, so it
+        requires admin and is best-effort. Skipped silently otherwise.
         """
         key_path = r"SOFTWARE\Policies\Microsoft\Windows\EdgeUI"
         try:
@@ -252,7 +255,7 @@ class KioskModeKeyBlocker:
                 winreg.CloseKey(key)
                 print("  Edge swipe gestures re-enabled")
         except PermissionError:
-            print("  Edge swipe policy: permission denied (needs admin)")
+            print("  Edge swipe policy: needs admin (HKLM-only); skipped")
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -261,31 +264,30 @@ class KioskModeKeyBlocker:
     @staticmethod
     def _set_task_view_button(disabled: bool) -> None:
         """Control Task View button (Win+Tab trigger area on taskbar).
-        Sets HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced
-              ShowTaskViewButton = 0 (hide) or 1 (show).
+        Per-user setting under HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced.
         """
-        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
         try:
             key = winreg.CreateKeyEx(
-                winreg.HKEY_LOCAL_MACHINE, key_path, 0,
-                winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY)
+                winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             value = 0 if disabled else 1
             winreg.SetValueEx(key, "ShowTaskViewButton", 0, winreg.REG_DWORD, value)
             winreg.CloseKey(key)
             state = "hidden" if disabled else "visible"
-            print(f"  Task View button set to {state}")
+            print(f"  Task View button set to {state} (current user)")
         except PermissionError:
-            print("  Task View button: permission denied (needs admin)")
+            print("  Task View button: permission denied")
         except Exception as e:
             print(f"  Task View button error: {e}")
 
     # ------------------------------------------------------------------
 
-    def start_kiosk_mode(self, target_window_hwnd=None):
+    def start_kiosk_mode(self, target_window_hwnd=None, system_lockdown: bool = True):
         if self.blocked:
             return False
 
         self.blocked = True
+        self.system_lockdown = system_lockdown
 
         if not self.start_keyboard_listener():
             print("Failed to start keyboard listener")
@@ -293,8 +295,14 @@ class KioskModeKeyBlocker:
             return False
 
         self.running = True
-        self.disable_task_manager()
-        self.suppress_gestures()
+        if system_lockdown:
+            self.disable_task_manager()
+            self.suppress_gestures()
+        else:
+            print(
+                "System lockdown disabled (dev mode): Task Manager, Task View "
+                "button and edge-swipe policy will NOT be modified"
+            )
 
         self.browser_window = target_window_hwnd
 
@@ -309,6 +317,9 @@ class KioskModeKeyBlocker:
         self.blocked = False
 
         self.stop_keyboard_listener()
+        # Always attempt to roll back the policies so any orphaned values from
+        # a previous crashed run also get cleaned up. Both helpers are no-ops
+        # when the registry value is missing.
         self.enable_task_manager()
         self.restore_gestures()
 
@@ -325,11 +336,13 @@ class KioskModeKeyBlocker:
 kiosk_blocker = KioskModeKeyBlocker()
 
 
-def start_exam_kiosk_mode(target_window_hwnd=None):
+def start_exam_kiosk_mode(target_window_hwnd=None, system_lockdown: bool = True):
     if not kiosk_blocker.is_admin():
         print("Not Admin")
 
-    return kiosk_blocker.start_kiosk_mode(target_window_hwnd)
+    return kiosk_blocker.start_kiosk_mode(
+        target_window_hwnd, system_lockdown=system_lockdown
+    )
 
 
 def stop_exam_kiosk_mode():
@@ -338,6 +351,46 @@ def stop_exam_kiosk_mode():
 
 def set_target_browser_window(hwnd):
     kiosk_blocker.set_target_window(hwnd)
+
+
+# ---------------------------------------------------------------------------
+# Emergency cleanup: ensures Task Manager / gestures get restored even if
+# the process is killed externally or crashes before SecureBrowser.safe_exit
+# can run. Must be installed from the main thread (signal.signal restriction).
+# ---------------------------------------------------------------------------
+_emergency_handlers_installed = False
+
+
+def _emergency_cleanup(*_args, **_kwargs):
+    try:
+        kiosk_blocker.stop_kiosk_mode()
+    except Exception as exc:
+        print(f"emergency keyblock cleanup failed: {exc}")
+
+
+def install_emergency_handlers() -> None:
+    """Register atexit + SIGINT/SIGTERM/SIGBREAK to roll back kiosk policies.
+
+    Idempotent. Safe to call multiple times. Must be invoked from the main
+    thread (Python's `signal.signal` raises ValueError otherwise).
+    """
+    global _emergency_handlers_installed
+    if _emergency_handlers_installed:
+        return
+
+    atexit.register(_emergency_cleanup)
+
+    for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _emergency_cleanup)
+        except (OSError, ValueError):
+            # Some signals can't be installed in non-main threads on Windows.
+            pass
+
+    _emergency_handlers_installed = True
 
 
 if __name__ == "__main__":

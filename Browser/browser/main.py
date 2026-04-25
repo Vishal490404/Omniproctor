@@ -16,9 +16,16 @@ from PyQt6.QtWebEngineCore import (
 from PyQt6.QtCore import QUrl, QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 
-from keyblocks import start_exam_kiosk_mode, stop_exam_kiosk_mode, set_target_browser_window
+from keyblocks import (
+    install_emergency_handlers as install_keyblock_emergency_handlers,
+    set_target_browser_window,
+    start_exam_kiosk_mode,
+    stop_exam_kiosk_mode,
+)
 from network.native_firewall_controller import NativeFirewallController, emergency_firewall_cleanup
 from protocol_handler import ensure_registered, register, unregister
+
+NO_SYSTEM_LOCKDOWN_FLAG = "--no-system-lockdown"
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 WDA_NONE = 0x00000000
@@ -65,13 +72,16 @@ class KioskWorker(QThread):
     finished_success = pyqtSignal()
     finished_failure = pyqtSignal(str)
 
-    def __init__(self, hwnd: int, parent=None):
+    def __init__(self, hwnd: int, system_lockdown: bool = True, parent=None):
         super().__init__(parent)
         self.hwnd = hwnd
+        self.system_lockdown = system_lockdown
 
     def run(self):
         try:
-            ok = start_exam_kiosk_mode(self.hwnd)
+            ok = start_exam_kiosk_mode(
+                self.hwnd, system_lockdown=self.system_lockdown
+            )
             if ok:
                 self.finished_success.emit()
             else:
@@ -156,7 +166,12 @@ class CustomWebEnginePage(QWebEnginePage):
 # Main Secure Browser Window
 # -------------------------
 class SecureBrowser(QMainWindow):
-    def __init__(self, url: str, browser_exe_path: str | None = None):
+    def __init__(
+        self,
+        url: str,
+        browser_exe_path: str | None = None,
+        system_lockdown: bool = True,
+    ):
         super().__init__()
         self.setWindowTitle("Secure Kiosk Browser")
 
@@ -168,6 +183,7 @@ class SecureBrowser(QMainWindow):
         self.network_protection_ready = False
         self._target_url_loaded = False
         self._shutdown_started = False
+        self.system_lockdown = system_lockdown
 
         # UI setup
         main_widget = QWidget()
@@ -628,7 +644,9 @@ class SecureBrowser(QMainWindow):
             hwnd = int(self.winId())
             print(f"Window handle: {hwnd}")
             set_target_browser_window(hwnd)
-            self.kiosk_worker = KioskWorker(hwnd)
+            self.kiosk_worker = KioskWorker(
+                hwnd, system_lockdown=self.system_lockdown
+            )
             self.kiosk_worker.finished_success.connect(self._on_kiosk_started)
             self.kiosk_worker.finished_failure.connect(lambda err: print("Kiosk start failed:", err))
             self.kiosk_worker.start()
@@ -842,6 +860,8 @@ if __name__ == "__main__":
     if "--unregister-protocol" in sys.argv:
         sys.exit(0 if unregister() else 1)
 
+    no_system_lockdown = NO_SYSTEM_LOCKDOWN_FLAG in sys.argv
+
     if not ensure_run_as_admin():
         sys.exit(1)
 
@@ -849,6 +869,14 @@ if __name__ == "__main__":
         ensure_registered()
     except Exception as exc:
         print(f"Protocol self-registration skipped: {exc}")
+
+    # Install emergency cleanup early (must run on the main thread) so
+    # SIGINT / SIGTERM / SIGBREAK and atexit reliably restore Task Manager
+    # and gestures even on hard exits.
+    try:
+        install_keyblock_emergency_handlers()
+    except Exception as exc:
+        print(f"Could not install keyblock emergency handlers: {exc}")
 
     enhanced_args = sys.argv + [
         '--enable-features=WindowManagement,WebRTC-Hardware-H264-Encoding,WebRTC-Hardware-H264-Decoding',
@@ -886,7 +914,13 @@ if __name__ == "__main__":
     window = SecureBrowser(
         target_url,
         browser_exe_path=browser_exe_path,
+        system_lockdown=not no_system_lockdown,
     )
+    if no_system_lockdown:
+        print(
+            "Dev mode: --no-system-lockdown set. Task Manager and gesture "
+            "policies will NOT be touched on this run."
+        )
     _active_browser_instance = window
     window.show()
 
