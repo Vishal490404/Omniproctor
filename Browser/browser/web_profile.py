@@ -132,47 +132,71 @@ def _configure_settings(profile: QWebEngineProfile) -> None:
     Attr = QWebEngineSettings.WebAttribute
     dev_mode = os.getenv("OMNIPROCTOR_DEV", "").strip() in {"1", "true", "True"}
 
-    enabled = [
-        Attr.JavascriptEnabled,
-        Attr.JavascriptCanOpenWindows,
-        Attr.AllowWindowActivationFromJavaScript,
-        Attr.LocalStorageEnabled,
-        Attr.ScreenCaptureEnabled,
-        Attr.FullScreenSupportEnabled,
-        Attr.PluginsEnabled,
-        Attr.AutoLoadImages,
-        Attr.LocalContentCanAccessRemoteUrls,
-        Attr.LocalContentCanAccessFileUrls,
+    # Look up every attribute by name via getattr() so a Qt build that drops
+    # or renames any of these constants doesn't crash startup. (PyQt6 6.10
+    # removed SmoothScrollingEnabled from the public WebAttribute enum, for
+    # example.) Anything missing on the current Qt is silently skipped and
+    # the kiosk continues without it.
+    enabled_names = (
+        "JavascriptEnabled",
+        "JavascriptCanOpenWindows",
+        "AllowWindowActivationFromJavaScript",
+        "LocalStorageEnabled",
+        "ScreenCaptureEnabled",
+        "FullScreenSupportEnabled",
+        "PluginsEnabled",
+        "AutoLoadImages",
+        "LocalContentCanAccessRemoteUrls",
+        "LocalContentCanAccessFileUrls",
         # Performance + UX
-        Attr.Accelerated2dCanvasEnabled,
-        Attr.WebGLEnabled,
-        Attr.ScrollAnimatorEnabled,
-        Attr.SmoothScrollingEnabled,
-        Attr.SpatialNavigationEnabled,
-        Attr.HyperlinkAuditingEnabled,
+        "Accelerated2dCanvasEnabled",
+        "WebGLEnabled",
+        "ScrollAnimatorEnabled",
+        "SmoothScrollingEnabled",
+        "SpatialNavigationEnabled",
+        "HyperlinkAuditingEnabled",
         # Real exam UIs need these
-        Attr.JavascriptCanAccessClipboard,
-        Attr.JavascriptCanPaste,
-        Attr.PdfViewerEnabled,
-        Attr.PlaybackRequiresUserGesture,  # set False below
-    ]
-    disabled = [
-        Attr.PlaybackRequiresUserGesture,  # so audio/video probes don't block
-        Attr.WebRTCPublicInterfacesOnly,
-        Attr.DnsPrefetchEnabled,  # firewall blocks unknown lookups anyway
-    ]
+        "JavascriptCanAccessClipboard",
+        "JavascriptCanPaste",
+        "PdfViewerEnabled",
+    )
+    disabled_names = (
+        # Audio/video probes mustn't block on a click gesture in exam UIs.
+        "PlaybackRequiresUserGesture",
+        # Keep WebRTC visible to all interfaces (we firewall at the WFP layer).
+        "WebRTCPublicInterfacesOnly",
+        # The firewall blocks unknown lookups anyway.
+        "DnsPrefetchEnabled",
+    )
 
-    for attr in enabled:
+    skipped_enabled, skipped_disabled = [], []
+    for name in enabled_names:
+        attr = getattr(Attr, name, None)
+        if attr is None:
+            skipped_enabled.append(name)
+            continue
         try:
             settings.setAttribute(attr, True)
         except (AttributeError, TypeError):
-            continue
+            skipped_enabled.append(name)
 
-    for attr in disabled:
+    for name in disabled_names:
+        attr = getattr(Attr, name, None)
+        if attr is None:
+            skipped_disabled.append(name)
+            continue
         try:
             settings.setAttribute(attr, False)
         except (AttributeError, TypeError):
-            continue
+            skipped_disabled.append(name)
+
+    if skipped_enabled or skipped_disabled:
+        logger.info(
+            "WebAttribute(s) not present on this Qt build (skipped) -> "
+            "enabled_missing=%s disabled_missing=%s",
+            skipped_enabled,
+            skipped_disabled,
+        )
 
     # Safety / dev-only flips ------------------------------------------------
     for name, value in (
@@ -184,11 +208,12 @@ def _configure_settings(profile: QWebEngineProfile) -> None:
         ("ReadingFromCanvasEnabled", True),
     ):
         attr = getattr(Attr, name, None)
-        if attr is not None:
-            try:
-                settings.setAttribute(attr, value)
-            except (AttributeError, TypeError):
-                pass
+        if attr is None:
+            continue
+        try:
+            settings.setAttribute(attr, value)
+        except (AttributeError, TypeError):
+            pass
 
 
 def _on_download_requested(download: QWebEngineDownloadRequest) -> None:
