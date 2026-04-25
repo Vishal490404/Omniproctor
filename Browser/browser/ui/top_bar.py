@@ -50,6 +50,8 @@ class KioskTopBar(QWidget):
     """The persistent top bar shown above the embedded web view."""
 
     exit_requested = pyqtSignal()
+    back_requested = pyqtSignal()
+    forward_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -85,6 +87,31 @@ class KioskTopBar(QWidget):
         brand_box.addWidget(brand_icon)
         brand_box.addWidget(brand_text)
         root.addLayout(brand_box)
+
+        # ---- Back / Forward navigation ------------------------------------
+        # Surface ONLY back / forward (no reload, no address bar) so the
+        # candidate can recover from accidental navigations inside the
+        # exam UI (e.g. opening a help link) without ever having a way to
+        # type a new URL.
+        nav_box = QHBoxLayout()
+        nav_box.setSpacing(4)
+        self.back_button = QPushButton("\u2190")  # ←
+        self.back_button.setObjectName("ghostButton")
+        self.back_button.setToolTip("Back")
+        self.back_button.setFixedSize(36, 32)
+        self.back_button.setEnabled(False)
+        self.back_button.clicked.connect(self.back_requested.emit)
+        nav_box.addWidget(self.back_button)
+
+        self.forward_button = QPushButton("\u2192")  # →
+        self.forward_button.setObjectName("ghostButton")
+        self.forward_button.setToolTip("Forward")
+        self.forward_button.setFixedSize(36, 32)
+        self.forward_button.setEnabled(False)
+        self.forward_button.clicked.connect(self.forward_requested.emit)
+        nav_box.addWidget(self.forward_button)
+
+        root.addLayout(nav_box)
 
         # ---- Test info -----------------------------------------------------
         info_box = QVBoxLayout()
@@ -158,6 +185,14 @@ class KioskTopBar(QWidget):
             self.monitor_pill.set_state("ok", "1 Display")
         else:
             self.monitor_pill.set_state("bad", f"{count} Displays!")
+
+    def set_navigation_state(self, can_go_back: bool, can_go_forward: bool) -> None:
+        """Sync back/forward button enabled state with the page history."""
+        try:
+            self.back_button.setEnabled(bool(can_go_back))
+            self.forward_button.setEnabled(bool(can_go_forward))
+        except Exception:
+            pass
 
     def set_countdown(self, total_seconds: int) -> None:
         """Switch the timer from elapsed-since-start to count-down."""

@@ -1,8 +1,63 @@
 import atexit
 import ctypes
+from ctypes import wintypes
 import keyboard
 import signal
 import winreg
+
+# ---------------------------------------------------------------------------
+# Win32 broadcast helper: tell Explorer + every top-level window that we
+# changed a registry value so the live UI reloads instead of waiting for a
+# logoff. Without this, ``ShowTaskViewButton`` and ``AllowEdgeSwipe`` look
+# like they "didn't restore" because Explorer caches the policy in-process.
+# ---------------------------------------------------------------------------
+HWND_BROADCAST = 0xFFFF
+WM_SETTINGCHANGE = 0x001A
+SMTO_ABORTIFHUNG = 0x0002
+
+
+def _broadcast_setting_change(area: str = "Policy") -> None:
+    """Best-effort SendMessageTimeout(WM_SETTINGCHANGE) so Explorer reloads.
+
+    Explorer caches several registry-backed values per-area and only
+    reloads when it sees a matching ``WM_SETTINGCHANGE`` broadcast. We
+    fire a small set of well-known area names so a single restore call
+    refreshes the taskbar (TraySettings), policies (Policy), explorer
+    shell (Environment), and ``ImmersiveColorSet`` for good measure.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        result = wintypes.DWORD(0)
+        labels = {area, "Policy", "TraySettings", "Environment", "ImmersiveColorSet"}
+        for label in labels:
+            user32.SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                ctypes.c_wchar_p(label),
+                SMTO_ABORTIFHUNG,
+                200,
+                ctypes.byref(result),
+            )
+    except Exception as exc:
+        print(f"  WM_SETTINGCHANGE broadcast failed: {exc}")
+
+
+def _refresh_explorer_taskbar() -> None:
+    """Force Explorer to re-read its per-user shell settings.
+
+    Used as a belt-and-braces companion to ``WM_SETTINGCHANGE`` for the
+    Task View button: SHChangeNotify with SHCNE_ASSOCCHANGED makes
+    Explorer drop its cached shell-config snapshot.
+    """
+    SHCNE_ASSOCCHANGED = 0x08000000
+    SHCNF_IDLIST = 0x0000
+    try:
+        ctypes.windll.shell32.SHChangeNotify(
+            SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None
+        )
+    except Exception as exc:
+        print(f"  SHChangeNotify failed: {exc}")
 
 
 class KioskModeKeyBlocker:
@@ -177,30 +232,48 @@ class KioskModeKeyBlocker:
             return False
 
     def enable_task_manager(self):
-        success = False
-        try:
+        """Remove the ``DisableTaskMgr`` policy from BOTH HKCU and HKLM.
 
-            key_path = r"Software\Microsoft\Windows\CurrentVersion\Policies\System"
+        Always attempted, even if we never set it ourselves, so an orphan
+        from a prior crashed run is also cleaned. Broadcasts a policy
+        refresh so Explorer drops its cached version of the policy
+        immediately - without the broadcast Task Manager appears to
+        "remain disabled" until logoff.
+        """
+        cleared_anywhere = False
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Policies\System"
 
+        for hive, hive_label in (
+            (winreg.HKEY_CURRENT_USER, "HKCU"),
+            (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
+        ):
             try:
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+                key = winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE)
                 try:
                     winreg.DeleteValue(key, "DisableTaskMgr")
-                    print("Task Manager re-enabled via registry (current user only)")
-                    success = True
+                    cleared_anywhere = True
+                    print(f"Task Manager re-enabled via registry ({hive_label})")
                 except FileNotFoundError:
                     pass
-                winreg.CloseKey(key)
-            except (PermissionError, FileNotFoundError):
+                finally:
+                    winreg.CloseKey(key)
+            except FileNotFoundError:
                 pass
+            except PermissionError:
+                # HKLM requires admin. Don't fail the whole cleanup just
+                # because the per-user value was the only one we set.
+                pass
+            except Exception as exc:
+                print(f"  enable_task_manager {hive_label} error: {exc}")
 
-            if not success:
-                print("DisableTaskMgr registry value was not set")
-            return True
-        except Exception as e:
-            print(f"Could not re-enable Task Manager: {e}")
-            return False
+        try:
+            _broadcast_setting_change("Policy")
+        except Exception:
+            pass
+
+        if not cleared_anywhere:
+            print("DisableTaskMgr registry value was not set anywhere")
+        return True
 
     # ------------------------------------------------------------------
     # Gesture & trackpad suppression via winreg
@@ -218,16 +291,38 @@ class KioskModeKeyBlocker:
             return False
 
     def restore_gestures(self) -> bool:
-        """Re-enable edge swipes and Task View button."""
+        """Re-enable edge swipes and Task View button.
+
+        ALWAYS attempts the rollback (no early-out on ``_gestures_suppressed``)
+        so an orphaned policy from a previously-crashed session also gets
+        cleaned. After writing the registry, broadcasts ``WM_SETTINGCHANGE``
+        so Explorer / DWM reload the value without requiring a logoff -
+        without this broadcast the Task View button and edge-swipe
+        policy stay frozen in their disabled state until the next login.
+        """
+        ok = True
         try:
             self._set_edge_swipe_policy(disabled=False)
+        except Exception as exc:
+            print(f"  edge swipe restore error: {exc}")
+            ok = False
+        try:
             self._set_task_view_button(disabled=False)
-            self._gestures_suppressed = False
+        except Exception as exc:
+            print(f"  task view button restore error: {exc}")
+            ok = False
+        try:
+            _broadcast_setting_change("TraySettings")
+            _refresh_explorer_taskbar()
+            print("  Broadcast WM_SETTINGCHANGE + SHChangeNotify to refresh Explorer")
+        except Exception:
+            pass
+        self._gestures_suppressed = False
+        if ok:
             print("Gestures and trackpad swipes restored via registry")
-            return True
-        except Exception as e:
-            print(f"Error restoring gestures: {e}")
-            return False
+        else:
+            print("Gestures restore completed with one or more best-effort errors")
+        return ok
 
     @staticmethod
     def _set_edge_swipe_policy(disabled: bool) -> None:
@@ -309,21 +404,43 @@ class KioskModeKeyBlocker:
         return True
 
     def stop_kiosk_mode(self):
-        if not self.blocked:
-            return False
-        print("Stopping kiosk mode...")
+        """Tear down kiosk mode and ALWAYS roll back system-level changes.
+
+        Idempotent and safe to call from atexit, signal handlers and the
+        main shutdown path. Returns True if any cleanup ran.
+
+        Note: the previous implementation early-returned when
+        ``self.blocked`` was False, which meant a crash that happened
+        between ``disable_task_manager()`` and ``self.blocked = True``
+        in ``start_kiosk_mode`` left the registry policy on but skipped
+        cleanup on the way out. We now always run the unwind.
+        """
+        was_active = self.blocked or self._gestures_suppressed
+        if was_active:
+            print("Stopping kiosk mode...")
 
         self.running = False
         self.blocked = False
 
-        self.stop_keyboard_listener()
-        # Always attempt to roll back the policies so any orphaned values from
-        # a previous crashed run also get cleaned up. Both helpers are no-ops
-        # when the registry value is missing.
-        self.enable_task_manager()
-        self.restore_gestures()
+        try:
+            self.stop_keyboard_listener()
+        except Exception as exc:
+            print(f"  stop_keyboard_listener error: {exc}")
 
-        print("Kiosk mode deactivated - Normal operation restored")
+        # ALWAYS run these - they are no-ops if the registry value is
+        # already absent. This is what catches orphaned registry state
+        # from a previously crashed kiosk session.
+        try:
+            self.enable_task_manager()
+        except Exception as exc:
+            print(f"  enable_task_manager error: {exc}")
+        try:
+            self.restore_gestures()
+        except Exception as exc:
+            print(f"  restore_gestures error: {exc}")
+
+        if was_active:
+            print("Kiosk mode deactivated - Normal operation restored")
         return True
 
     def is_admin(self):

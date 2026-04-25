@@ -325,6 +325,8 @@ class SecureBrowser(QMainWindow):
             parent=main_widget,
         )
         self.top_bar.exit_requested.connect(self.confirm_exit)
+        self.top_bar.back_requested.connect(self._navigate_back)
+        self.top_bar.forward_requested.connect(self._navigate_forward)
 
         # ---- Persistent Web Engine profile (perf-profile) -----------------
         self.profile = build_kiosk_profile(parent=self)
@@ -338,6 +340,10 @@ class SecureBrowser(QMainWindow):
             self.custom_page.renderProcessTerminated.connect(self._on_render_process_terminated)
         except Exception as exc:
             print(f"WARN: could not bind renderProcessTerminated: {exc}")
+
+        # Keep top-bar back/forward enabled state in sync with page history.
+        self.custom_page.urlChanged.connect(self._sync_nav_buttons)
+        self.custom_page.loadFinished.connect(lambda _ok: self._sync_nav_buttons())
 
         # Qt 6.8+ exposes the new QWebEnginePermission API via the
         # ``permissionRequested`` signal. The ONLY place modern permission
@@ -807,6 +813,36 @@ class SecureBrowser(QMainWindow):
             self.showFullScreen()
 
     # -------------------------
+    # Top-bar navigation (back / forward)
+    # -------------------------
+    def _navigate_back(self) -> None:
+        try:
+            history = self.custom_page.history()
+            if history and history.canGoBack():
+                history.back()
+        except Exception as exc:
+            print(f"WARN: navigate back failed: {exc}")
+
+    def _navigate_forward(self) -> None:
+        try:
+            history = self.custom_page.history()
+            if history and history.canGoForward():
+                history.forward()
+        except Exception as exc:
+            print(f"WARN: navigate forward failed: {exc}")
+
+    def _sync_nav_buttons(self, *_args) -> None:
+        """Keep the top bar's back/forward buttons in sync with history."""
+        try:
+            history = self.custom_page.history()
+            if not history:
+                self.top_bar.set_navigation_state(False, False)
+                return
+            self.top_bar.set_navigation_state(history.canGoBack(), history.canGoForward())
+        except Exception as exc:
+            print(f"WARN: nav-state sync failed: {exc}")
+
+    # -------------------------
     # Security / monitoring timers
     # -------------------------
     def setup_security_monitoring(self):
@@ -1008,13 +1044,19 @@ class SecureBrowser(QMainWindow):
         except Exception:
             pass
 
-        if self.kiosk_active:
-            try:
-                stop_exam_kiosk_mode()
-            except Exception as e:
-                print("Error stopping kiosk mode:", e)
-            self.kiosk_active = False
-            print("Kiosk protection deactivated")
+        # ALWAYS run kiosk cleanup, regardless of self.kiosk_active.
+        # KioskWorker enables Task Manager / gesture / hotkey blocks on a
+        # background thread; if the user exits before _on_kiosk_started
+        # fires (or the thread silently raises), self.kiosk_active is
+        # still False but the registry HAS been modified. Calling the
+        # idempotent stop_exam_kiosk_mode() always rolls back any
+        # orphaned state.
+        try:
+            stop_exam_kiosk_mode()
+        except Exception as e:
+            print("Error stopping kiosk mode:", e)
+        self.kiosk_active = False
+        print("Kiosk protection deactivated")
 
         if self.network_worker:
             try:
@@ -1024,6 +1066,13 @@ class SecureBrowser(QMainWindow):
             except Exception as e:
                 print("Error cleaning up network worker:", e)
             self.network_worker = None
+
+        # Belt-and-braces: even if NetworkWorker.cleanup() raised, force
+        # the WFP filters down so the user's internet is restored.
+        try:
+            emergency_firewall_cleanup()
+        except Exception as e:
+            print("Error in emergency firewall cleanup:", e)
 
         app = QApplication.instance()
         if app is not None:
@@ -1225,6 +1274,23 @@ if __name__ == "__main__":
             print(f"Firewall recovery failed: {exc}")
             sys.exit(1)
 
+    if "--system-recover" in sys.argv:
+        # Full restoration pass: kiosk policies (Task Manager, edge swipes,
+        # Task View button), keyboard hooks, AND the WFP firewall. Useful
+        # if a previous run was force-killed and left registry / firewall
+        # state behind. Doesn't require a target URL.
+        print("Running full system recovery (kiosk policies + firewall)…")
+        try:
+            stop_exam_kiosk_mode()
+        except Exception as exc:
+            print(f"  kiosk policy rollback error: {exc}")
+        try:
+            emergency_firewall_cleanup()
+        except Exception as exc:
+            print(f"  firewall rollback error: {exc}")
+        print("System recovery completed.")
+        sys.exit(0)
+
     no_system_lockdown = NO_SYSTEM_LOCKDOWN_FLAG in sys.argv
 
     if not ensure_run_as_admin():
@@ -1294,6 +1360,13 @@ if __name__ == "__main__":
             splash.finish(window)
         except Exception:
             pass
+
+    # Final safety net: Qt's clean shutdown path. atexit + signal handlers
+    # cover crashes, but a Qt-driven quit (X-button, app.quit()) emits
+    # ``aboutToQuit`` and we want kiosk + firewall rolled back BEFORE the
+    # interpreter starts dismantling Python objects (some of which
+    # ``stop_exam_kiosk_mode`` indirectly depends on).
+    app.aboutToQuit.connect(_atexit_cleanup)
 
     exit_code = app.exec()
     sys.exit(exit_code)
