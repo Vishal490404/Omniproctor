@@ -120,11 +120,28 @@ QPushButton#accentButton {
 QPushButton#accentButton:hover { background-color: @accentdark; }
 
 QPushButton#ghostButton {
-    background-color: transparent;
-    color: @text;
-    border: 1px solid @border;
+    background-color: @surface3;
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.20);
+    border-radius: 8px;
+    padding: 0px;
+    font-size: 18px;
+    font-weight: 700;
 }
-QPushButton#ghostButton:hover { background-color: @surface3; border-color: rgba(255,255,255,0.18); }
+QPushButton#ghostButton:hover {
+    background-color: @primary;
+    color: white;
+    border-color: @primary;
+}
+QPushButton#ghostButton:pressed {
+    background-color: @primarydark;
+    border-color: @primarydark;
+}
+QPushButton#ghostButton:disabled {
+    background-color: transparent;
+    color: rgba(255, 255, 255, 0.30);
+    border-color: rgba(255, 255, 255, 0.10);
+}
 
 /* ---- Message box ---------------------------------------------------- */
 QMessageBox {

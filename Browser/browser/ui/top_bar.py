@@ -94,20 +94,26 @@ class KioskTopBar(QWidget):
         # exam UI (e.g. opening a help link) without ever having a way to
         # type a new URL.
         nav_box = QHBoxLayout()
-        nav_box.setSpacing(4)
-        self.back_button = QPushButton("\u2190")  # ←
+        nav_box.setSpacing(6)
+        # Triangle glyphs (◀ / ▶) render solid in every Windows system font
+        # and stay sharply visible against the dark surface; the lighter
+        # arrow characters (←/→) end up looking like 1px hairlines on
+        # high-DPI laptops.
+        self.back_button = QPushButton("\u25C0")  # ◀
         self.back_button.setObjectName("ghostButton")
         self.back_button.setToolTip("Back")
-        self.back_button.setFixedSize(36, 32)
+        self.back_button.setFixedSize(40, 36)
         self.back_button.setEnabled(False)
+        self.back_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_button.clicked.connect(self.back_requested.emit)
         nav_box.addWidget(self.back_button)
 
-        self.forward_button = QPushButton("\u2192")  # →
+        self.forward_button = QPushButton("\u25B6")  # ▶
         self.forward_button.setObjectName("ghostButton")
         self.forward_button.setToolTip("Forward")
-        self.forward_button.setFixedSize(36, 32)
+        self.forward_button.setFixedSize(40, 36)
         self.forward_button.setEnabled(False)
+        self.forward_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.forward_button.clicked.connect(self.forward_requested.emit)
         nav_box.addWidget(self.forward_button)
 

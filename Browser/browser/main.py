@@ -1074,6 +1074,10 @@ class SecureBrowser(QMainWindow):
         except Exception as e:
             print("Error in emergency firewall cleanup:", e)
 
+        # Mark cleanup complete so the later aboutToQuit + atexit hooks
+        # short-circuit instead of repeating ~2 s of WFP / broadcast work.
+        _mark_cleanup_done()
+
         app = QApplication.instance()
         if app is not None:
             QTimer.singleShot(100, app.quit)
@@ -1094,9 +1098,24 @@ class SecureBrowser(QMainWindow):
 _active_browser_instance: SecureBrowser | None = None
 
 
+_cleanup_done = False
+
+
 def _atexit_cleanup():
     """Last-resort cleanup so the user's internet and gestures are restored
-    even if the app crashes or is killed."""
+    even if the app crashes or is killed.
+
+    Idempotent and run-once. ``safe_exit`` is the normal shutdown path
+    and already does all of this work synchronously - so when
+    ``aboutToQuit`` and the interpreter's ``atexit`` later fire, we
+    short-circuit instead of repeating the same expensive cleanup
+    (each pass costs ~2 s of WFP teardown + WM_SETTINGCHANGE
+    broadcasts, which made End Session feel slow).
+    """
+    global _cleanup_done
+    if _cleanup_done:
+        return
+    _cleanup_done = True
     try:
         if _active_browser_instance and _active_browser_instance.network_worker:
             _active_browser_instance.network_worker.cleanup()
@@ -1113,6 +1132,12 @@ def _atexit_cleanup():
 
 
 atexit.register(_atexit_cleanup)
+
+
+def _mark_cleanup_done() -> None:
+    """Called by ``safe_exit`` so the later atexit + aboutToQuit are no-ops."""
+    global _cleanup_done
+    _cleanup_done = True
 
 
 def _emergency_excepthook(exc_type, exc_value, exc_tb):

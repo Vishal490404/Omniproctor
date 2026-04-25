@@ -19,24 +19,29 @@ SMTO_ABORTIFHUNG = 0x0002
 def _broadcast_setting_change(area: str = "Policy") -> None:
     """Best-effort SendMessageTimeout(WM_SETTINGCHANGE) so Explorer reloads.
 
-    Explorer caches several registry-backed values per-area and only
-    reloads when it sees a matching ``WM_SETTINGCHANGE`` broadcast. We
-    fire a small set of well-known area names so a single restore call
-    refreshes the taskbar (TraySettings), policies (Policy), explorer
-    shell (Environment), and ``ImmersiveColorSet`` for good measure.
+    Explorer caches the registry-backed shell settings we touch
+    (``ShowTaskViewButton`` and the EdgeUI policy) and only reloads
+    when it sees a matching ``WM_SETTINGCHANGE`` broadcast. Two area
+    labels cover everything we need (the taskbar tray for the Task View
+    button, and the generic policy refresh) - we kept the timeout very
+    tight so this never noticeably delays End Session.
     """
     try:
         user32 = ctypes.windll.user32
         result = wintypes.DWORD(0)
-        labels = {area, "Policy", "TraySettings", "Environment", "ImmersiveColorSet"}
-        for label in labels:
+        # Deduplicated, ordered. Two labels at 80 ms = ~160 ms worst case.
+        seen = set()
+        for label in ("TraySettings", "Policy", area):
+            if not label or label in seen:
+                continue
+            seen.add(label)
             user32.SendMessageTimeoutW(
                 HWND_BROADCAST,
                 WM_SETTINGCHANGE,
                 0,
                 ctypes.c_wchar_p(label),
                 SMTO_ABORTIFHUNG,
-                200,
+                80,
                 ctypes.byref(result),
             )
     except Exception as exc:
@@ -279,16 +284,42 @@ class KioskModeKeyBlocker:
     # Gesture & trackpad suppression via winreg
     # ------------------------------------------------------------------
     def suppress_gestures(self) -> bool:
-        """Disable Windows 10/11 edge swipes and Task View button via registry."""
+        """Disable Windows 10/11 edge swipes and Task View button via registry.
+
+        After writing the registry we MUST broadcast ``WM_SETTINGCHANGE``
+        and tap ``SHChangeNotify`` - Explorer reads ``ShowTaskViewButton``
+        and the EdgeUI policy ONCE at session start and then caches them
+        in-process. Without the broadcast the registry says "disabled"
+        but the live taskbar still shows the Task View button and edge
+        swipes still fire, which is exactly the "disabler isn't working"
+        symptom.
+        """
+        ok_edge = True
+        ok_task = True
         try:
             self._set_edge_swipe_policy(disabled=True)
+        except Exception as exc:
+            print(f"  edge swipe disable error: {exc}")
+            ok_edge = False
+        try:
             self._set_task_view_button(disabled=True)
-            self._gestures_suppressed = True
+        except Exception as exc:
+            print(f"  task view button disable error: {exc}")
+            ok_task = False
+
+        try:
+            _broadcast_setting_change("TraySettings")
+            _refresh_explorer_taskbar()
+            print("  Broadcast WM_SETTINGCHANGE + SHChangeNotify so Explorer applies the disable")
+        except Exception:
+            pass
+
+        self._gestures_suppressed = True
+        if ok_edge and ok_task:
             print("Gestures and trackpad swipes suppressed via registry")
-            return True
-        except Exception as e:
-            print(f"Error suppressing gestures: {e}")
-            return False
+        else:
+            print("Gestures suppressed with one or more best-effort errors")
+        return ok_edge and ok_task
 
     def restore_gestures(self) -> bool:
         """Re-enable edge swipes and Task View button.
