@@ -419,13 +419,13 @@ class NetshFirewallController(FirewallControllerBase):
 
 
 class WfpNativeFirewallController(FirewallControllerBase):
-    """App-level WFP backend that talks to fwpuclnt.dll directly.
+    """App-level WFP backend that talks to ``fwpuclnt.dll`` directly.
 
-    Modeled on ``simplewall``: installs filters in our own provider/sublayer
-    at weight 0xFFFF so they preempt any pre-existing Windows Firewall allow
-    rule in the default sublayer. This is the only backend that actually
-    blocks other apps' traffic when, for example, Microsoft Edge or Defender
-    has already added explicit allow rules for itself.
+    Installs filters in our own WFP provider/sublayer at weight 0xFFFF so
+    they preempt any pre-existing Windows Firewall allow rule in the
+    default sublayer. This is the only backend that actually blocks other
+    apps' traffic when, for example, Microsoft Edge or Defender has
+    already added explicit allow rules for itself.
     """
 
     def __init__(self, browser_executable_path: str):

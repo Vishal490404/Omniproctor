@@ -1,13 +1,16 @@
-/* OmniProctor kiosk theme.
- * @primary, @danger, @success, @surface, @text tokens are substituted
- * at load time by browser/ui/theme.py. Do not use real CSS variables —
- * Qt's QSS engine doesn't understand them.
+/* OmniProctor kiosk theme - mirrors the WebClient Mantine palette
+ * (primary teal #12b886, accent blue #228be6, dark surface gradient).
+ *
+ * Tokens (@primary, @primarydark, @accent, @accentdark, @danger,
+ * @dangerdark, @success, @warning, @surface, @surface2, @surface3,
+ * @border, @text, @textmuted) are substituted at load time by
+ * browser/ui/theme.py - Qt's QSS engine has no real variables.
  */
 
 QWidget {
     background-color: @surface;
     color: @text;
-    font-family: "Segoe UI", "Inter", "Helvetica Neue", sans-serif;
+    font-family: "Poppins", "Segoe UI", "Inter", "Helvetica Neue", sans-serif;
     font-size: 13px;
 }
 
@@ -21,10 +24,12 @@ QLabel {
 }
 
 QLabel#kioskBrand {
-    font-size: 16px;
+    font-family: "Outfit", "Poppins", "Segoe UI", sans-serif;
+    font-size: 17px;
     font-weight: 700;
     letter-spacing: 0.4px;
-    padding-left: 4px;
+    padding-left: 6px;
+    color: @primary;
 }
 
 QLabel#kioskTitle {
@@ -42,11 +47,12 @@ QLabel#kioskSubtitle {
 QLabel#kioskTimer {
     font-size: 18px;
     font-weight: 700;
-    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-family: "Cascadia Mono", "JetBrains Mono", "Consolas", monospace;
     color: @text;
     padding: 4px 14px;
-    border-radius: 8px;
-    background-color: @surface2;
+    border-radius: 10px;
+    background-color: @surface3;
+    border: 1px solid @border;
 }
 
 /* ---- Status pills ---------------------------------------------------- */
@@ -55,30 +61,34 @@ QLabel.statusPill {
     border-radius: 999px;
     font-size: 11px;
     font-weight: 600;
-    background-color: @surface2;
+    background-color: @surface3;
     color: @textmuted;
     margin: 0 3px;
+    border: 1px solid @border;
 }
 
 QLabel.statusPill[status="ok"] {
-    background-color: rgba(22, 163, 74, 0.18);
+    background-color: rgba(18, 184, 134, 0.18);
     color: @success;
+    border-color: rgba(18, 184, 134, 0.35);
 }
 
 QLabel.statusPill[status="warn"] {
-    background-color: rgba(217, 119, 6, 0.20);
+    background-color: rgba(245, 159, 0, 0.20);
     color: @warning;
+    border-color: rgba(245, 159, 0, 0.40);
 }
 
 QLabel.statusPill[status="bad"] {
-    background-color: rgba(220, 38, 38, 0.20);
+    background-color: rgba(250, 82, 82, 0.20);
     color: @danger;
+    border-color: rgba(250, 82, 82, 0.45);
 }
 
 /* ---- Top bar container --------------------------------------------- */
 QWidget#kioskTopBar {
     background-color: @surface2;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+    border-bottom: 1px solid @border;
 }
 
 /* ---- Buttons -------------------------------------------------------- */
@@ -87,13 +97,13 @@ QPushButton {
     color: white;
     border: none;
     padding: 8px 16px;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 12px;
     font-weight: 600;
 }
 QPushButton:hover { background-color: @primarydark; }
 QPushButton:pressed { background-color: @primarydark; }
-QPushButton:disabled { background-color: @surface2; color: @textmuted; }
+QPushButton:disabled { background-color: @surface3; color: @textmuted; }
 
 QPushButton#dangerButton {
     background-color: @danger;
@@ -103,12 +113,18 @@ QPushButton#dangerButton {
 QPushButton#dangerButton:hover { background-color: @dangerdark; }
 QPushButton#dangerButton:pressed { background-color: @dangerdark; }
 
+QPushButton#accentButton {
+    background-color: @accent;
+    color: white;
+}
+QPushButton#accentButton:hover { background-color: @accentdark; }
+
 QPushButton#ghostButton {
     background-color: transparent;
     color: @text;
-    border: 1px solid rgba(148, 163, 184, 0.35);
+    border: 1px solid @border;
 }
-QPushButton#ghostButton:hover { background-color: @surface2; }
+QPushButton#ghostButton:hover { background-color: @surface3; border-color: rgba(255,255,255,0.18); }
 
 /* ---- Message box ---------------------------------------------------- */
 QMessageBox {

@@ -38,16 +38,15 @@ A full-stack web application consisting of:
 ### Prerequisites
 
 - **For Browser Application**:
-    - Windows OS
-    - Python 3.8 or higher
-    - Administrator privileges (for firewall control)
-    - **SimpleWall must be installed before setting up the browser** (for network restrictions)
-    (This will be removed in future update and the browser will not depend on any external firewall)
+    - Windows 10/11 (x64)
+    - Python 3.10 or higher (only for source-tree dev runs; the installer ships its own runtime)
+    - Administrator privileges (required for the native Windows Filtering Platform integration)
 
-!!! warning "SimpleWall Required (Temporary Workaround)"
-    The browser application currently requires [SimpleWall](https://www.simplewall.org/) to be installed and configured on your system.
-
-    **Why?** Due to time constraints and the complexity of implementing custom Windows Filtering Platform (WFP) drivers, we are using SimpleWall as a temporary solution for network isolation. This external dependency will be removed and replaced with native firewall rules in future updates.
+!!! info "Native firewall (no external dependency)"
+    The browser ships a built-in app-level firewall built directly on the
+    Windows Filtering Platform via ``fwpuclnt.dll``. There is no external
+    SimpleWall / third-party firewall dependency – install the kiosk and
+    you're done.
 
 - **For Dashboard**:
     - Node.js 16 or higher

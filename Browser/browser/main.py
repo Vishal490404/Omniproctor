@@ -116,40 +116,148 @@ class CustomWebEnginePage(QWebEnginePage):
             pass
 
     def createWindow(self, type):
+        """Open child popups (e.g. Google OAuth, payment frames) inside the
+        kiosk in a controlled, hardened window.
+
+        Critical for Google / Microsoft / Auth0 sign-in: the page calls
+        ``window.open('https://accounts.google.com/...', '_blank')`` and
+        then communicates with the popup via ``window.opener``. The
+        popup must:
+
+        * Open with the SAME ``QWebEngineProfile`` so cookies and the
+          shared session are visible.
+        * Not be closed prematurely while the user is typing credentials.
+          We previously auto-closed any popup whose URL stayed at
+          ``about:blank`` for >300 ms, which is enough to nuke a slow
+          OAuth window before it even navigates.
+        * Honour ``window.close()`` from the OAuth page so it disappears
+          after sign-in (handled via ``windowCloseRequested``).
+        * Be excluded from screen capture, just like the main window.
+        """
         try:
-            popup_view = QWebEngineView()
+            owner = self.parent_browser
+            owner_window = owner.window() if owner else None
+
+            popup_view = QWebEngineView(owner_window)
+            popup_view.setWindowFlag(Qt.WindowType.Window, True)
+            try:
+                popup_view.setWindowModality(Qt.WindowModality.NonModal)
+            except Exception:
+                pass
+
             popup_page = CustomWebEnginePage(self.profile(), popup_view)
             popup_view.setPage(popup_page)
             popup_view.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            popup_view.setWindowFlag(Qt.WindowType.Window, True)
-            popup_view.resize(800, 600)
-            popup_view.setWindowTitle("OmniProctor - Secure Browser")
+            popup_view.resize(900, 680)
+            popup_view.setWindowTitle("OmniProctor - Sign in")
+
+            try:
+                popup_view.setWindowIcon(KioskTopBar.make_window_icon())
+            except Exception:
+                pass
 
             self.popup_windows.append(popup_view)
+            popup_page.featurePermissionRequested.connect(
+                lambda origin, feature, page=popup_page: self._popup_grant_legacy(page, origin, feature)
+            )
+            try:
+                popup_page.permissionRequested.connect(self._popup_grant_modern)
+            except (AttributeError, TypeError):
+                pass
 
             popup_page.windowCloseRequested.connect(lambda pv=popup_view: self._close_popup(pv))
+
+            popup_state = {
+                "ever_navigated": False,
+                "popup_view": popup_view,
+            }
 
             def on_url_changed(url):
                 url_str = url.toString()
                 print("Popup urlChanged:", url_str)
-                if url_str in ("", "about:blank", "data:,", "data:text/html,", "data:text/html;charset=utf-8,"):
-                    QTimer.singleShot(400, lambda pv=popup_view: self._close_popup_if_blank(pv))
+                if url_str and not (
+                    url_str.startswith("about:blank")
+                    or url_str.startswith("data:,")
+                    or url_str.startswith("data:text/html,")
+                    or url_str.startswith("data:text/html;charset=utf-8,")
+                ):
+                    popup_state["ever_navigated"] = True
 
             popup_page.urlChanged.connect(on_url_changed)
 
             def on_load_finished(ok):
-                if ok:
-                    QTimer.singleShot(300, lambda pv=popup_view: self._close_popup_if_blank(pv))
+                # Only treat the popup as stillborn if it has never left
+                # about:blank AFTER a real load attempt completed. OAuth
+                # popups frequently hold at about:blank for a beat before
+                # the JS opener does ``popup.location = '...'``.
+                if not ok and not popup_state["ever_navigated"]:
+                    QTimer.singleShot(500, lambda pv=popup_view: self._close_popup_if_blank(pv))
+
             popup_page.loadFinished.connect(on_load_finished)
 
             popup_view.show()
+            popup_view.raise_()
+            popup_view.activateWindow()
 
-            QTimer.singleShot(3000, lambda pv=popup_view: self._close_popup_if_blank(pv))
+            # Apply screen-capture protection + DWM hardening once the
+            # native HWND exists. Some OAuth pages wait for window focus
+            # before redirecting, so this also helps focus latency.
+            def _harden_popup():
+                try:
+                    hwnd = int(popup_view.winId())
+                    if hwnd:
+                        harden_kiosk_window(hwnd)
+                except Exception as exc:
+                    print(f"WARN: popup harden failed: {exc}")
+
+            QTimer.singleShot(150, _harden_popup)
+
+            # Long stale-popup safety net: if after 30 s the popup still
+            # has not navigated anywhere real, assume it's a leak and
+            # close it. 30 s is generous enough for the slowest OAuth
+            # provider on a flaky link, but short enough that a
+            # silently-broken popup doesn't sit around forever.
+            def _timeout_check(pv=popup_view):
+                try:
+                    if popup_state["ever_navigated"]:
+                        return
+                    if pv in self.popup_windows:
+                        print("Auto-closing popup that never navigated within 30 s")
+                        self._close_popup(pv)
+                except Exception as exc:
+                    print(f"Error in popup timeout check: {exc}")
+
+            QTimer.singleShot(30000, _timeout_check)
 
             return popup_page
         except Exception as e:
             print("Error creating popup window:", e)
             return super().createWindow(type)
+
+    def _popup_grant_legacy(self, page, origin, feature):
+        """Auto-grant legacy-API permissions on a popup page (camera/mic
+        rarely needed there, but generic for completeness)."""
+        try:
+            page.setFeaturePermission(
+                origin,
+                feature,
+                QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
+            )
+            print(f"Popup permission granted: feature={int(feature)} origin={origin.toString()}")
+        except Exception as exc:
+            print(f"WARN: popup setFeaturePermission failed: {exc}")
+
+    def _popup_grant_modern(self, permission):
+        """Auto-grant new-API permissions on a popup page."""
+        try:
+            permission.grant()
+            try:
+                ptype_name = getattr(permission.permissionType(), "name", "?")
+            except Exception:
+                ptype_name = "?"
+            print(f"Popup modern permission granted: {ptype_name}")
+        except Exception as exc:
+            print(f"WARN: popup permission.grant failed: {exc}")
 
     def _close_popup(self, popup_view):
         try:

@@ -203,13 +203,6 @@ export function DownloadsPage() {
               >
                 {downloading ? `${progress}%` : 'Download for Windows'}
               </Button>
-              <Button
-                variant="subtle"
-                leftSection={<IconExternalLink size={16} />}
-                onClick={tryOpenKiosk}
-              >
-                Already installed? Open kiosk
-              </Button>
             </Group>
           </Stack>
         </Card>
@@ -235,10 +228,6 @@ export function DownloadsPage() {
                 <i>Open in kiosk browser</i> on any assigned test.
               </Text>
             </Stack>
-            <Alert color="blue" icon={<IconInfoCircle size={16} />} title="Loader is supported">
-              Refresh this page after installing if the kiosk-launch link is
-              still treated as a regular link.
-            </Alert>
           </Stack>
         </Card>
       </SimpleGrid>

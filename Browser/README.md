@@ -133,10 +133,11 @@ launch and Defender may flag the WFP / keyboard-hook behaviour.
   the device. Close it, then refresh the kiosk page.
 - **Window visible in Snipping Tool / Teams share**: this requires Windows 10
   2004 or newer. On older builds, `WDA_EXCLUDEFROMCAPTURE` silently no-ops.
-- **`omniproctor-browser://` link not opening anything**: re-run
-  `OmniProctorKiosk.exe --register-protocol`, or re-install the kiosk and
-  ensure the "Register the omniproctor-browser:// URL protocol" task is
-  checked in the Inno Setup wizard.
+- **`omniproctor-browser://` link not opening anything**: the installer
+  registers the protocol unconditionally per-machine (HKLM). If a prior
+  install was uninstalled, simply re-run the installer or, for a quick
+  per-user fix without admin rights, run
+  `OmniProctorKiosk.exe --register-protocol`.
 
 ## License
 

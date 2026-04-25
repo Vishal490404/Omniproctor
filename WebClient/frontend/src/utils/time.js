@@ -41,6 +41,35 @@ export function toLocalDateTimeInputValue(value) {
   return `${year}-${month}-${day}T${hours}:${minutes}`
 }
 
+/**
+ * Build a default {start, end} pair for the create-test form.
+ *
+ * Start = "now" rounded UP to the next 5-minute boundary so the picker
+ * never shows a slot that is already in the past by the time the user
+ * looks at the form.
+ *
+ * End = start + ``durationMinutes`` (defaults to 60 i.e. 1 hour).
+ *
+ * Both values are returned as ``YYYY-MM-DDTHH:MM`` strings suitable for
+ * a native ``<input type="datetime-local">`` element.
+ */
+export function getDefaultTestWindow(durationMinutes = 60) {
+  const ROUND_TO_MIN = 5
+  const now = new Date()
+  const remainder = now.getMinutes() % ROUND_TO_MIN
+  if (remainder !== 0 || now.getSeconds() > 0 || now.getMilliseconds() > 0) {
+    now.setMinutes(now.getMinutes() + (ROUND_TO_MIN - remainder))
+  }
+  now.setSeconds(0, 0)
+
+  const end = new Date(now.getTime() + durationMinutes * 60 * 1000)
+
+  return {
+    start_time: toLocalDateTimeInputValue(now),
+    end_time: toLocalDateTimeInputValue(end),
+  }
+}
+
 export function getTestStatus(test, currentTime = new Date()) {
   const start = new Date(test?.start_time)
   const end = new Date(test?.end_time)

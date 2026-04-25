@@ -18,22 +18,29 @@ import { useEffect, useState } from 'react'
 
 import { testsApi } from '../api/services'
 import { buildKioskLaunchUrl, normalizeTestUrl } from '../utils/browserLaunch'
-import { formatDateIST, getTestStatus, toLocalDateTimeInputValue, toUtcIsoFromLocalDateTime } from '../utils/time'
+import { formatDateIST, getDefaultTestWindow, getTestStatus, toLocalDateTimeInputValue, toUtcIsoFromLocalDateTime } from '../utils/time'
 
 export function TestsPage() {
   const [tests, setTests] = useState([])
   const [loading, setLoading] = useState(false)
   const [includeInactive, setIncludeInactive] = useState(true)
   const [editingTestId, setEditingTestId] = useState(null)
-  const [form, setForm] = useState({
-    name: '',
-    description: '',
-    external_link: '',
-    is_active: true,
-    max_attempts: 1,
-    start_time: '',
-    end_time: '',
-  })
+  // Default the create form to a 1-hour window starting at the next
+  // 5-minute boundary. This mirrors what most teachers want anyway and
+  // gets rid of the empty-required-field error on first submit.
+  const buildEmptyForm = () => {
+    const window = getDefaultTestWindow(60)
+    return {
+      name: '',
+      description: '',
+      external_link: '',
+      is_active: true,
+      max_attempts: 1,
+      start_time: window.start_time,
+      end_time: window.end_time,
+    }
+  }
+  const [form, setForm] = useState(buildEmptyForm)
 
   const getErrorMessage = (error, fallback = 'Try again') => {
     const detail = error?.response?.data?.detail
@@ -100,7 +107,7 @@ export function TestsPage() {
       }
       await testsApi.create(payload)
       notifications.show({ color: 'teal', title: 'Test created', message: 'New test added successfully' })
-      setForm({ name: '', description: '', external_link: '', is_active: true, max_attempts: 1, start_time: '', end_time: '' })
+      setForm(buildEmptyForm())
       loadTests()
     } catch (error) {
       notifications.show({ color: 'red', title: 'Create failed', message: getErrorMessage(error) })
@@ -122,7 +129,7 @@ export function TestsPage() {
 
   const resetForm = () => {
     setEditingTestId(null)
-    setForm({ name: '', description: '', external_link: '', is_active: true, max_attempts: 1, start_time: '', end_time: '' })
+    setForm(buildEmptyForm())
   }
 
   const saveTest = async () => {
