@@ -2,6 +2,7 @@ import sys
 import os
 import atexit
 import ctypes
+from ctypes import wintypes
 from typing import List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -603,6 +604,18 @@ class SecureBrowser(QMainWindow):
         def on_load_finished(success):
             try:
                 self.inject_monitoring_scripts(success)
+                # Drop the bootstrap about:blank entry from history so the
+                # Back arrow doesn't land the candidate on a blank page.
+                # ``QWebEngineHistory.clear()`` removes ALL entries except
+                # the current one, which is exactly what we want.
+                if success:
+                    try:
+                        history = self.custom_page.history()
+                        if history:
+                            history.clear()
+                            self._sync_nav_buttons()
+                    except Exception as exc:
+                        print(f"WARN: history clear failed: {exc}")
             finally:
                 try:
                     self.custom_page.loadFinished.disconnect(on_load_finished)
@@ -815,30 +828,61 @@ class SecureBrowser(QMainWindow):
     # -------------------------
     # Top-bar navigation (back / forward)
     # -------------------------
+    @staticmethod
+    def _is_blank_url(url_str: str) -> bool:
+        if not url_str:
+            return True
+        s = url_str.strip().lower()
+        return s in ("", "about:blank", "about:srcdoc", "data:,")
+
+    def _neighbor_is_blank(self, history, *, forward: bool) -> bool:
+        """Return True if the next back/forward entry is a blank page."""
+        try:
+            items = history.forwardItems(1) if forward else history.backItems(1)
+            if not items:
+                return False
+            return self._is_blank_url(items[0].url().toString())
+        except Exception:
+            return False
+
     def _navigate_back(self) -> None:
         try:
             history = self.custom_page.history()
-            if history and history.canGoBack():
-                history.back()
+            if not history or not history.canGoBack():
+                return
+            if self._neighbor_is_blank(history, forward=False):
+                # Skip the bootstrap blank page entirely.
+                return
+            history.back()
         except Exception as exc:
             print(f"WARN: navigate back failed: {exc}")
 
     def _navigate_forward(self) -> None:
         try:
             history = self.custom_page.history()
-            if history and history.canGoForward():
-                history.forward()
+            if not history or not history.canGoForward():
+                return
+            if self._neighbor_is_blank(history, forward=True):
+                return
+            history.forward()
         except Exception as exc:
             print(f"WARN: navigate forward failed: {exc}")
 
     def _sync_nav_buttons(self, *_args) -> None:
-        """Keep the top bar's back/forward buttons in sync with history."""
+        """Keep the top bar's back/forward buttons in sync with history.
+
+        Treats an immediate ``about:blank`` neighbor as "no navigation
+        possible" so the bootstrap blank page never shows up as a
+        reachable destination.
+        """
         try:
             history = self.custom_page.history()
             if not history:
                 self.top_bar.set_navigation_state(False, False)
                 return
-            self.top_bar.set_navigation_state(history.canGoBack(), history.canGoForward())
+            can_back = history.canGoBack() and not self._neighbor_is_blank(history, forward=False)
+            can_fwd = history.canGoForward() and not self._neighbor_is_blank(history, forward=True)
+            self.top_bar.set_navigation_state(can_back, can_fwd)
         except Exception as exc:
             print(f"WARN: nav-state sync failed: {exc}")
 
@@ -854,10 +898,139 @@ class SecureBrowser(QMainWindow):
         self.popup_cleanup_timer.timeout.connect(self.cleanup_blank_popups)
         self.popup_cleanup_timer.start(5000)
 
+        # Track which Win32 window currently has the foreground / focus.
+        # If the user manages to slip past the kiosk (gesture, hotkey, OS
+        # popup, UAC prompt, …) the foreground window will no longer be
+        # ours and we record / log that event for proctoring review.
+        self._focus_state = {
+            "last_hwnd": 0,
+            "last_title": "",
+            "last_proc": "",
+            "external_hits": 0,
+        }
+        self._focus_timer = QTimer(self)
+        self._focus_timer.setInterval(500)
+        self._focus_timer.timeout.connect(self._check_foreground_window)
+        self._focus_timer.start()
+
     def check_fullscreen_mode(self):
         if not self.isFullScreen():
             print("Restoring fullscreen mode for exam security")
             self.showFullScreen()
+
+    # -------------------------
+    # Foreground / focus tracking
+    # -------------------------
+    @staticmethod
+    def _foreground_window_info():
+        """Return (hwnd, window_title, exe_basename) for the OS foreground window.
+
+        All best-effort; returns ``(0, "", "")`` if the Win32 calls fail
+        (e.g. running on macOS during dev). Designed to be cheap enough
+        to poll twice a second.
+        """
+        try:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return 0, "", ""
+
+            length = user32.GetWindowTextLengthW(hwnd)
+            title = ""
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            exe_name = ""
+            if pid.value:
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                h_proc = kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value
+                )
+                if h_proc:
+                    try:
+                        path_buf = ctypes.create_unicode_buffer(520)
+                        size = wintypes.DWORD(len(path_buf))
+                        if kernel32.QueryFullProcessImageNameW(
+                            h_proc, 0, path_buf, ctypes.byref(size)
+                        ):
+                            exe_name = os.path.basename(path_buf.value)
+                    finally:
+                        kernel32.CloseHandle(h_proc)
+            return int(hwnd), title, exe_name
+        except Exception:
+            return 0, "", ""
+
+    def _check_foreground_window(self) -> None:
+        """Polled every 500 ms - log + react when focus leaves the kiosk.
+
+        We compare the OS foreground HWND to our top-level window's HWND
+        (and any owned popup HWNDs). When focus drifts to a foreign
+        window, we:
+          * log a single line with title + exe name (so the proctor
+            review log captures it without flooding),
+          * update the top-bar monitor pill to "Focus lost" briefly,
+          * try to raise/activate ourselves back to the foreground.
+        """
+        try:
+            fg_hwnd, fg_title, fg_proc = self._foreground_window_info()
+            if not fg_hwnd:
+                return
+
+            our_hwnds = {int(self.winId())}
+            try:
+                if hasattr(self, "custom_page") and hasattr(self.custom_page, "popup_windows"):
+                    for popup in self.custom_page.popup_windows:
+                        try:
+                            if popup and popup.isVisible():
+                                our_hwnds.add(int(popup.winId()))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            state = self._focus_state
+            if fg_hwnd in our_hwnds:
+                # Back in our window. Reset external streak only when we
+                # transition from "external" → "ours" so we don't spam.
+                if state["last_hwnd"] not in our_hwnds and state["last_hwnd"] != 0:
+                    print(f"[focus] regained kiosk focus (was: {state['last_proc']!r})")
+                state["last_hwnd"] = fg_hwnd
+                state["last_title"] = fg_title
+                state["last_proc"] = fg_proc
+                state["external_hits"] = 0
+                return
+
+            # Foreign window.
+            if fg_hwnd != state["last_hwnd"]:
+                print(
+                    f"[focus] external window in foreground: hwnd={fg_hwnd} "
+                    f"proc={fg_proc!r} title={fg_title!r}"
+                )
+            state["last_hwnd"] = fg_hwnd
+            state["last_title"] = fg_title
+            state["last_proc"] = fg_proc
+            state["external_hits"] += 1
+
+            # Best-effort yank back. Don't fight system dialogs (UAC,
+            # credential UI) - they live in winlogon and we'd just lose.
+            blessed_system_procs = {
+                "consent.exe", "credentialuihost.exe", "lockapp.exe",
+                "logonui.exe", "applicationframehost.exe",
+            }
+            if fg_proc.lower() not in blessed_system_procs:
+                try:
+                    self.activateWindow()
+                    self.raise_()
+                except Exception:
+                    pass
+        except Exception as exc:
+            # Never let the focus poller crash the kiosk.
+            print(f"WARN: focus check failed: {exc}")
 
     def cleanup_blank_popups(self):
         if hasattr(self.custom_page, 'popup_windows'):
@@ -1028,6 +1201,8 @@ class SecureBrowser(QMainWindow):
                 self.popup_cleanup_timer.stop()
             if hasattr(self, '_monitor_poll') and self._monitor_poll:
                 self._monitor_poll.stop()
+            if hasattr(self, '_focus_timer') and self._focus_timer:
+                self._focus_timer.stop()
         except Exception:
             pass
 
