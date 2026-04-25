@@ -512,6 +512,83 @@ class WfpNativeFirewallController(FirewallControllerBase):
 
         return None
 
+    @staticmethod
+    def _enumerate_running_image_paths(target_basenames: set[str]) -> list[str]:
+        """Return image paths of every running process whose basename matches.
+
+        Uses ``EnumProcesses`` + ``QueryFullProcessImageNameW`` (Win32) so
+        the returned paths are exactly what the kernel resolves for
+        ``FWPM_CONDITION_ALE_APP_ID``. This sidesteps every path-canonicalization
+        edge case (junctions, app exec aliases, mixed slashes) that static
+        discovery can hit.
+        """
+        if sys.platform != "win32":
+            return []
+        try:
+            psapi = ctypes.WinDLL("psapi.dll", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+        except OSError:
+            return []
+
+        from ctypes import wintypes
+
+        EnumProcesses = psapi.EnumProcesses
+        EnumProcesses.argtypes = [
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        EnumProcesses.restype = wintypes.BOOL
+
+        OpenProcess = kernel32.OpenProcess
+        OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        OpenProcess.restype = wintypes.HANDLE
+        CloseHandle = kernel32.CloseHandle
+        CloseHandle.argtypes = [wintypes.HANDLE]
+        CloseHandle.restype = wintypes.BOOL
+
+        QueryFullProcessImageNameW = kernel32.QueryFullProcessImageNameW
+        QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        targets = {b.lower() for b in target_basenames}
+        results: list[str] = []
+
+        max_pids = 4096
+        pids = (wintypes.DWORD * max_pids)()
+        bytes_returned = wintypes.DWORD(0)
+        if not EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(bytes_returned)):
+            return []
+        n = bytes_returned.value // ctypes.sizeof(wintypes.DWORD)
+
+        seen: set[str] = set()
+        for i in range(n):
+            pid = pids[i]
+            if pid == 0:
+                continue
+            h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                continue
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(32768)
+                if QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    img = buf.value
+                    if img and os.path.basename(img).lower() in targets:
+                        key = img.lower()
+                        if key not in seen:
+                            seen.add(key)
+                            results.append(img)
+            finally:
+                CloseHandle(h)
+        return results
+
     def _build_allow_paths(self) -> list[str]:
         paths: list[str] = []
         if self.browser_exe:
@@ -526,6 +603,14 @@ class WfpNativeFirewallController(FirewallControllerBase):
             exe = ""
         if exe and exe.lower() != os.path.abspath(self.browser_exe).lower():
             paths.append(exe)
+        # Also include the paired python.exe / pythonw.exe in the same dir
+        # (e.g. when launched as pythonw.exe but Qt spawns python.exe somewhere).
+        if exe:
+            exe_dir = os.path.dirname(exe)
+            for name in ("python.exe", "pythonw.exe"):
+                candidate = os.path.join(exe_dir, name)
+                if os.path.isfile(candidate):
+                    paths.append(candidate)
 
         # CRITICAL: QtWebEngineProcess.exe is the Chromium child process that
         # actually opens TCP/UDP sockets. Without this entry, WFP blocks every
@@ -535,12 +620,39 @@ class WfpNativeFirewallController(FirewallControllerBase):
         if qt_we:
             logger.info("Discovered QtWebEngineProcess at %s", qt_we)
             paths.append(qt_we)
+            # Belt-and-braces: whitelist *every* .exe sitting next to
+            # QtWebEngineProcess.exe. Recent Chromium versions occasionally
+            # ship additional helper binaries (sandbox brokers, network
+            # service shims) and missing one of those silently breaks the
+            # browser even though the main binary is permitted.
+            qt_bin_dir = os.path.dirname(qt_we)
+            try:
+                for entry in os.listdir(qt_bin_dir):
+                    if entry.lower().endswith(".exe"):
+                        paths.append(os.path.join(qt_bin_dir, entry))
+            except OSError:
+                pass
         else:
             logger.warning(
                 "QtWebEngineProcess.exe not found; the embedded browser will "
                 "have NO network access. Set %s to its absolute path.",
                 EXTRA_ALLOW_PATHS_ENV,
             )
+
+        # Authoritative discovery: ask the kernel directly which processes
+        # are currently named QtWebEngineProcess.exe / pythonw.exe / python.exe
+        # and use *their* image paths. This eliminates any path-mismatch
+        # between what we infer statically and what WFP's ALE_APP_ID actually
+        # compares against (junctions, app-execution-aliases, casing edge
+        # cases, etc.).
+        try:
+            for runtime_path in self._enumerate_running_image_paths(
+                {"qtwebengineprocess.exe", "python.exe", "pythonw.exe"}
+            ):
+                logger.info("Discovered running process image at %s", runtime_path)
+                paths.append(runtime_path)
+        except Exception as exc:
+            logger.warning("Runtime process enumeration failed: %s", exc)
 
         extras = os.getenv(EXTRA_ALLOW_PATHS_ENV, "")
         if extras:

@@ -118,6 +118,20 @@ FW_WEIGHT_HIGHEST_IMPORTANT = 0x0F
 FW_WEIGHT_HIGHEST = 0x0E
 FW_WEIGHT_LOWEST = 0x08
 
+# FWPM_FILTER0::flags (from fwpmtypes.h). CLEAR_ACTION_RIGHT prevents a
+# lower-priority sublayer (e.g. the default Windows Firewall sublayer,
+# IPSEC, or a third-party security product's sublayer) from overriding
+# our PERMIT decision with a BLOCK. Without this flag, ANY block decision
+# in any sublayer can win regardless of weight.
+FWPM_FILTER_FLAG_NONE = 0x00000000
+FWPM_FILTER_FLAG_PERSISTENT = 0x00000001
+FWPM_FILTER_FLAG_BOOTTIME = 0x00000002
+FWPM_FILTER_FLAG_HAS_PROVIDER_CONTEXT = 0x00000004
+FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT = 0x00000008
+FWPM_FILTER_FLAG_PERMIT_IF_CALLOUT_UNREGISTERED = 0x00000010
+FWPM_FILTER_FLAG_DISABLED = 0x00000020
+FWPM_FILTER_FLAG_INDEXED = 0x00000040
+
 # FWP enums and constants
 FWP_ACTION_BLOCK = 0x00001001
 FWP_ACTION_PERMIT = 0x00001002
@@ -530,12 +544,13 @@ class WfpExamSession:
         weight: int,
         name: str,
         conditions: Optional[list[FWPM_FILTER_CONDITION0]] = None,
+        flags: int = 0,
     ) -> None:
         flt = FWPM_FILTER0()
         flt.filterKey = GUID.from_string(str(uuid.uuid4()))
         flt.displayData.name = name
         flt.displayData.description = name
-        flt.flags = 0
+        flt.flags = flags
         provider_key = GUID_OMNIPROCTOR_PROVIDER
         flt.providerKey = ctypes.pointer(provider_key)
         flt.layerKey = layer
@@ -614,6 +629,14 @@ class WfpExamSession:
             ("v6_in", FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6),
         )
 
+        # CLEAR_ACTION_RIGHT prevents BLOCK rules in lower-priority sublayers
+        # (default Windows Firewall, IPSEC, third-party AV/EDR) from
+        # overriding our PERMITs. Without it, *any* sublayer's BLOCK wins
+        # against an unflagged PERMIT regardless of sublayer weight — which
+        # is the most common reason a "correct-looking" PERMIT silently
+        # produces no traffic on machines that have other security software.
+        permit_flags = FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT
+
         for label, layer in outbound_layers + inbound_layers:
             for path in self._allow_app_paths:
                 blob_ptr = _resolve_app_id(self._engine, path)
@@ -624,6 +647,7 @@ class WfpExamSession:
                     weight=FW_WEIGHT_HIGHEST_IMPORTANT,
                     name=f"OmniProctor_Allow_App_{os.path.basename(path)}_{label}",
                     conditions=[self._cond_app_id(blob_ptr)],
+                    flags=permit_flags,
                 )
 
             self._add_filter(
@@ -632,6 +656,7 @@ class WfpExamSession:
                 weight=FW_WEIGHT_HIGHEST,
                 name=f"OmniProctor_Allow_Loopback_{label}",
                 conditions=[self._cond_loopback()],
+                flags=permit_flags,
             )
 
         # DNS + DHCP (outbound only — the system needs to *initiate* these).
@@ -642,6 +667,7 @@ class WfpExamSession:
                 weight=FW_WEIGHT_HIGHEST,
                 name=f"OmniProctor_Allow_DNS_UDP_{label}",
                 conditions=[self._cond_protocol(IPPROTO_UDP), self._cond_remote_port(53)],
+                flags=permit_flags,
             )
             self._add_filter(
                 layer=layer,
@@ -649,6 +675,7 @@ class WfpExamSession:
                 weight=FW_WEIGHT_HIGHEST,
                 name=f"OmniProctor_Allow_DNS_TCP_{label}",
                 conditions=[self._cond_protocol(IPPROTO_TCP), self._cond_remote_port(53)],
+                flags=permit_flags,
             )
             self._add_filter(
                 layer=layer,
@@ -656,7 +683,20 @@ class WfpExamSession:
                 weight=FW_WEIGHT_HIGHEST,
                 name=f"OmniProctor_Allow_DHCP_{label}",
                 conditions=[self._cond_protocol(IPPROTO_UDP), self._cond_remote_port(67)],
+                flags=permit_flags,
             )
+
+        # Diagnostic escape hatch: with OMNIPROCTOR_WFP_NO_BLOCK=1 we install
+        # only the PERMITs and let unmatched traffic fall through to the
+        # default Windows Firewall sublayer (which normally permits outbound).
+        # If the browser loads in this mode but not in normal mode, the issue
+        # is process-identity matching, not the PERMIT rules themselves.
+        if os.getenv("OMNIPROCTOR_WFP_NO_BLOCK", "").strip() in {"1", "true", "True"}:
+            logger.warning(
+                "OMNIPROCTOR_WFP_NO_BLOCK is set: skipping catch-all BLOCK "
+                "(diagnostic mode, network is NOT actually locked down)"
+            )
+            return
 
         # Catch-all BLOCK at lowest weight in our sublayer so the kernel
         # treats unmatched traffic as denied. Because our sublayer weight
