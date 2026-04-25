@@ -223,15 +223,22 @@ class SecureBrowser(QMainWindow):
             print(f"WARN: could not bind renderProcessTerminated: {exc}")
 
         # Qt 6.8+ exposes the new QWebEnginePermission API via the
-        # ``permissionRequested`` signal on QWebEngineProfile. This is the
-        # ONLY place where modern permission types (Window Management,
-        # Clipboard Read/Write, Local Fonts, …) are surfaced - the legacy
-        # ``featurePermissionRequested`` signal does not include them.
-        try:
-            self.profile.permissionRequested.connect(self.handle_modern_permission_request)
-            print("Modern permissionRequested signal bound (Qt 6.8+ API)")
-        except (AttributeError, TypeError) as exc:
-            print(f"INFO: modern permissionRequested signal not available: {exc}")
+        # ``permissionRequested`` signal. The ONLY place modern permission
+        # types (Window Management, Clipboard Read/Write, Local Fonts, …)
+        # are surfaced - the legacy ``featurePermissionRequested`` signal
+        # does not include them. The signal lives on QWebEnginePage in
+        # PyQt6 6.8+ (and on QWebEngineProfile in some builds), so try
+        # both to maximise compatibility.
+        bound_modern = False
+        for owner_name, owner in (("page", self.custom_page), ("profile", self.profile)):
+            try:
+                owner.permissionRequested.connect(self.handle_modern_permission_request)
+                print(f"Modern permissionRequested signal bound on {owner_name}")
+                bound_modern = True
+            except (AttributeError, TypeError):
+                pass
+        if not bound_modern:
+            print("INFO: modern permissionRequested signal not available on this Qt build")
 
         self.browser.setPage(self.custom_page)
         self.browser.setUrl(QUrl("about:blank"))
@@ -305,32 +312,57 @@ class SecureBrowser(QMainWindow):
             (function() {{
                 window.__qt_injected_screens = {js_screens};
 
-                if (!navigator.getScreenDetails) {{
-                    navigator.getScreenDetails = function() {{
-                        const screens = window.__qt_injected_screens.map((screen, index) => ({{
-                            availHeight: screen.height,
-                            availLeft: screen.left,
-                            availTop: screen.top,
-                            availWidth: screen.width,
-                            colorDepth: 24,
-                            height: screen.height,
-                            isExtended: index > 0,
-                            isInternal: index === 0,
-                            isPrimary: index === 0,
-                            left: screen.left,
-                            orientation: {{ angle: 0, type: 'landscape-primary' }},
-                            pixelDepth: 24,
-                            top: screen.top,
-                            width: screen.width,
-                            label: screen.name || `Screen ${{index + 1}}`,
-                            devicePixelRatio: window.devicePixelRatio || 1
-                        }}));
-
-                        return Promise.resolve({{
-                            screens: screens,
-                            currentScreen: screens[0] || null
-                        }});
+                function __qt_buildScreenDetailsResult() {{
+                    const screens = window.__qt_injected_screens.map((screen, index) => ({{
+                        availHeight: screen.height,
+                        availLeft: screen.left,
+                        availTop: screen.top,
+                        availWidth: screen.width,
+                        colorDepth: 24,
+                        height: screen.height,
+                        isExtended: index > 0,
+                        isInternal: index === 0,
+                        isPrimary: index === 0,
+                        left: screen.left,
+                        orientation: {{ angle: 0, type: 'landscape-primary' }},
+                        pixelDepth: 24,
+                        top: screen.top,
+                        width: screen.width,
+                        label: screen.name || `Screen ${{index + 1}}`,
+                        devicePixelRatio: window.devicePixelRatio || 1
+                    }}));
+                    const evtTarget = {{
+                        addEventListener: function() {{}},
+                        removeEventListener: function() {{}},
+                        dispatchEvent: function() {{ return true; }}
                     }};
+                    return Object.assign({{}}, evtTarget, {{
+                        screens: screens,
+                        currentScreen: screens[0] || null,
+                        oncurrentscreenchange: null,
+                        onscreenschange: null
+                    }});
+                }}
+
+                // ALWAYS replace getScreenDetails: in modern Chromium this
+                // method exists natively but rejects unless the embedder
+                // grants the window-management permission. Our shim feeds
+                // the page real screen geometry from Qt without needing the
+                // browser-level prompt.
+                const __qt_origGetScreenDetails = navigator.getScreenDetails ?
+                    navigator.getScreenDetails.bind(navigator) : null;
+                navigator.getScreenDetails = function() {{
+                    if (__qt_origGetScreenDetails) {{
+                        return __qt_origGetScreenDetails().catch(function() {{
+                            return __qt_buildScreenDetailsResult();
+                        }});
+                    }}
+                    return Promise.resolve(__qt_buildScreenDetailsResult());
+                }};
+                if (window.Window && window.Window.prototype) {{
+                    try {{
+                        window.Window.prototype.getScreenDetails = navigator.getScreenDetails;
+                    }} catch (e) {{}}
                 }}
 
                 if (window.screen) {{
