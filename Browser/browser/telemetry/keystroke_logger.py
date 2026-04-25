@@ -87,7 +87,7 @@ def _flush_burst() -> None:
 
     try:
         get_event_bus().emit(
-            "keystroke",
+            "KEYSTROKE",
             payload={"keys": events, "burst_size": len(events)},
             severity="info",
         )
@@ -139,7 +139,7 @@ def _on_key_event(event) -> None:
                 _pending.clear()
                 try:
                     get_event_bus().emit(
-                        "keystroke",
+                        "KEYSTROKE",
                         payload={"keys": events, "burst_size": len(events)},
                         severity="info",
                     )
@@ -197,7 +197,7 @@ def emit_blocked_hotkey(description: str, combo: str = "") -> None:
     """Called by keyblocks.py when a suppressed hotkey is intercepted."""
     try:
         get_event_bus().emit(
-            "blocked_hotkey",
+            "BLOCKED_HOTKEY",
             payload={
                 "description": description,
                 "combo": combo,

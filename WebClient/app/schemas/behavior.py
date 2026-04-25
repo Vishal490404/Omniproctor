@@ -11,6 +11,16 @@ class BehaviorEventCreateRequest(BaseModel):
     severity: str = "info"
     event_time: datetime | None = None
 
+    @field_validator("event_type", mode="before")
+    @classmethod
+    def _normalize_event_type(cls, value):
+        """Accept event_type strings in any case ("focus_loss" / "Focus_Loss"
+        / "FOCUS_LOSS") - upper-case before enum coercion so the kiosk and
+        server don't have to agree on case."""
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
     @field_validator("severity")
     @classmethod
     def _normalize_severity(cls, value: str) -> str:
@@ -42,14 +52,17 @@ MAX_BATCH_SIZE = 200
 
 
 class BehaviorEventBatchRequest(BaseModel):
-    events: list[BehaviorEventCreateRequest] = Field(default_factory=list)
+    """Raw batch envelope.
 
-    @field_validator("events")
-    @classmethod
-    def _cap_events(cls, value: list[BehaviorEventCreateRequest]) -> list[BehaviorEventCreateRequest]:
-        if len(value) > MAX_BATCH_SIZE:
-            raise ValueError(f"Batch may not exceed {MAX_BATCH_SIZE} events")
-        return value
+    We deliberately accept ``events`` as a list of arbitrary dicts and let
+    the endpoint validate per-item with try/except. If we typed this as
+    ``list[BehaviorEventCreateRequest]``, Pydantic would reject the entire
+    batch when a single event has an unknown ``event_type`` (e.g. a future
+    kiosk version sends a new enum value before the server is upgraded),
+    losing up to 199 perfectly valid events with it.
+    """
+
+    events: list[dict] = Field(default_factory=list)
 
 
 class BehaviorEventBatchResponse(BaseModel):

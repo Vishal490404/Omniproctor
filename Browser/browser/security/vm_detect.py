@@ -287,7 +287,7 @@ def emit_detection(bus_emit) -> VMDetectionResult:
     if result.is_vm:
         try:
             bus_emit(
-                "vm_detected",
+                "VM_DETECTED",
                 payload=result.to_payload(),
                 severity="critical",
             )

@@ -111,7 +111,7 @@ def scan_once(emit: Callable[[str, dict, str], None]) -> list[str]:
     if new_matches:
         try:
             emit(
-                "suspicious_process",
+                "SUSPICIOUS_PROCESS",
                 {
                     "processes": new_matches,
                     "all_active_matches": matches,

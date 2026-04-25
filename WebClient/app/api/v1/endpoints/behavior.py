@@ -1,8 +1,11 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, status
 
 from app.api.deps import AdminTeacherProctor, CurrentUser, DBSession, StudentOnly
 from app.models.user import UserRole
 from app.schemas.behavior import (
+    MAX_BATCH_SIZE,
     BehaviorEventBatchRequest,
     BehaviorEventBatchResponse,
     BehaviorEventCreateRequest,
@@ -17,6 +20,8 @@ from app.services.behavior_service import (
 )
 from app.services.test_service import ensure_manage_permission, get_test_or_404
 from app.services.warning_service import latest_warning_id_for_attempt
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -54,7 +59,12 @@ def ingest_behavior_events_batch(
 ):
     """Bulk ingestion path used by the kiosk's BatchPoster.
 
-    Capped at ``MAX_BATCH_SIZE`` events per call (validated by the schema).
+    Capped at ``MAX_BATCH_SIZE`` events per call (enforced here, not at
+    schema time, so we can return a clean 413 instead of a 422). Each
+    event is validated individually so a single malformed entry (e.g.
+    a future ``event_type`` the server doesn't know yet) doesn't reject
+    the whole batch.
+
     Returns the latest warning id known for the attempt so the kiosk can
     dedup its warning poll without an extra round-trip.
     """
@@ -65,15 +75,32 @@ def ingest_behavior_events_batch(
             detail="Cannot log events for another student",
         )
 
-    accepted = 0
+    raw_events = payload.events or []
+    if len(raw_events) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Batch may not exceed {MAX_BATCH_SIZE} events",
+        )
+
+    valid: list[BehaviorEventCreateRequest] = []
     rejected = 0
-    if payload.events:
-        accepted = create_behavior_events_bulk(db, attempt, payload.events)
-        rejected = len(payload.events) - accepted
+    for raw in raw_events:
+        try:
+            valid.append(BehaviorEventCreateRequest.model_validate(raw))
+        except Exception as exc:
+            rejected += 1
+            logger.warning(
+                "Dropping malformed event in batch (attempt %s): %s | event=%r",
+                attempt_id,
+                exc,
+                raw,
+            )
+
+    accepted = create_behavior_events_bulk(db, attempt, valid) if valid else 0
 
     return BehaviorEventBatchResponse(
         accepted=accepted,
-        rejected=rejected,
+        rejected=rejected + (len(valid) - accepted),
         latest_warning_id=latest_warning_id_for_attempt(db, attempt_id),
     )
 

@@ -744,7 +744,7 @@ class SecureBrowser(QMainWindow):
             pass
         try:
             get_event_bus().emit(
-                "renderer_crash",
+                "RENDERER_CRASH",
                 payload={"status": str(status), "exit_code": int(exit_code)},
                 severity="critical",
             )
@@ -952,7 +952,7 @@ class SecureBrowser(QMainWindow):
             print("Restoring fullscreen mode for exam security")
             try:
                 get_event_bus().emit(
-                    "fullscreen_exit",
+                    "FULLSCREEN_EXIT",
                     payload={"recovered": True},
                     severity="warn",
                 )
@@ -1041,7 +1041,7 @@ class SecureBrowser(QMainWindow):
                 if state["last_hwnd"] not in our_hwnds and state["last_hwnd"] != 0:
                     print(f"[focus] regained kiosk focus (was: {state['last_proc']!r})")
                     bus.emit(
-                        "focus_regain",
+                        "FOCUS_REGAIN",
                         payload={
                             "previous_proc": state.get("last_proc"),
                             "previous_title": state.get("last_title"),
@@ -1061,7 +1061,7 @@ class SecureBrowser(QMainWindow):
                     f"proc={fg_proc!r} title={fg_title!r}"
                 )
                 bus.emit(
-                    "focus_loss",
+                    "FOCUS_LOSS",
                     payload={
                         "hwnd": fg_hwnd,
                         "proc": fg_proc,
@@ -1116,7 +1116,7 @@ class SecureBrowser(QMainWindow):
                 preview = text[:64].replace("\n", " ")
 
             get_event_bus().emit(
-                "clipboard_copy",
+                "CLIPBOARD_COPY",
                 payload={
                     "length": len(text),
                     "has_text": mime.hasText(),
@@ -1179,7 +1179,7 @@ class SecureBrowser(QMainWindow):
                     except Exception:
                         continue
                 get_event_bus().emit(
-                    "monitor_count_change",
+                    "MONITOR_COUNT_CHANGE",
                     payload={"count": count, "screens": screen_meta},
                     severity="warn" if count > 1 else "info",
                 )
@@ -1268,7 +1268,7 @@ class SecureBrowser(QMainWindow):
             if result.is_vm:
                 print(f"[vm_detect] indicators: {result.indicators}")
                 get_event_bus().emit(
-                    "vm_detected",
+                    "VM_DETECTED",
                     payload=result.to_payload(),
                     severity="critical",
                 )
@@ -1332,7 +1332,7 @@ class SecureBrowser(QMainWindow):
             print(f"WARN: failed to render warning banner: {exc}")
         try:
             get_event_bus().emit(
-                "warning_delivered",
+                "WARNING_DELIVERED",
                 payload={
                     "warning_id": warning.get("id"),
                     "severity": warning.get("severity"),
