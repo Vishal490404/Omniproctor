@@ -552,11 +552,21 @@ class WfpNativeFirewallController(FirewallControllerBase):
         seen: set[str] = set()
         deduped: list[str] = []
         for p in paths:
-            key = os.path.abspath(p).lower()
+            # Canonicalize to a fully-backslashed long-form Win32 path so the
+            # WFP app-ID blob matches the kernel-resolved NT device path of
+            # the live process. Mixed forward/backslashes (as returned by
+            # QLibraryInfo) silently produce a non-matching blob, which lets
+            # our catch-all BLOCK eat the browser's own traffic.
+            canonical = (
+                wfp_native._canonicalize_win32_path(p)
+                if wfp_native is not None
+                else os.path.normpath(os.path.abspath(p))
+            )
+            key = canonical.lower()
             if key in seen:
                 continue
             seen.add(key)
-            deduped.append(p)
+            deduped.append(canonical)
         return deduped
 
     def enter_exam_mode(self) -> bool:

@@ -386,6 +386,37 @@ def _make_uint32_value(v: int) -> FWP_VALUE0:
     return val
 
 
+def _canonicalize_win32_path(file_path: str) -> str:
+    """Convert a possibly-mixed-slash path into the form WFP expects.
+
+    Steps:
+        1. ``os.path.abspath`` to anchor relative paths.
+        2. ``os.path.normpath`` to convert forward slashes to backslashes
+           and collapse ``.`` / ``..`` segments. ``FwpmGetAppIdFromFileName0``
+           takes a "fully-qualified Win32 path" and Win32 path parsing
+           splits on backslash only — a mixed-slash path produces an app-ID
+           blob that never matches the kernel-resolved NT device path of
+           the running process.
+        3. ``GetLongPathNameW`` on Windows to flatten any 8.3 short-name
+           components (e.g. ``DESKTO~1``) into the long form WFP normalizes to.
+    """
+    p = os.path.abspath(file_path)
+    p = os.path.normpath(p)
+    if sys.platform == "win32":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            GetLongPathNameW = kernel32.GetLongPathNameW
+            GetLongPathNameW.argtypes = [LPCWSTR, LPWSTR, c_uint32]
+            GetLongPathNameW.restype = c_uint32
+            buf = ctypes.create_unicode_buffer(32768)
+            rc = GetLongPathNameW(p, buf, 32768)
+            if rc and rc < 32768:
+                p = buf.value
+        except Exception:
+            pass
+    return p
+
+
 def _resolve_app_id(engine: HANDLE, file_path: str) -> POINTER(FWP_BYTE_BLOB):
     """Return a heap-allocated FWP_BYTE_BLOB describing the executable.
 
@@ -393,9 +424,17 @@ def _resolve_app_id(engine: HANDLE, file_path: str) -> POINTER(FWP_BYTE_BLOB):
     """
     if FwpmGetAppIdFromFileName0 is None:
         raise RuntimeError("fwpuclnt.dll is not available")
+    canonical = _canonicalize_win32_path(file_path)
     blob_ptr = POINTER(FWP_BYTE_BLOB)()
-    code = FwpmGetAppIdFromFileName0(file_path, byref(blob_ptr))
-    _check(code, f"FwpmGetAppIdFromFileName0({file_path})")
+    code = FwpmGetAppIdFromFileName0(canonical, byref(blob_ptr))
+    _check(code, f"FwpmGetAppIdFromFileName0({canonical})")
+    blob_size = blob_ptr.contents.size if blob_ptr else 0
+    logger.info(
+        "Resolved app-ID for %s -> blob size=%d bytes (%d UTF-16 chars including NUL)",
+        canonical,
+        blob_size,
+        blob_size // 2,
+    )
     return blob_ptr
 
 
@@ -419,7 +458,9 @@ class WfpExamSession:
         self._sublayer_added = False
         self._provider_added = False
         self._allow_app_paths = [
-            os.path.abspath(p) for p in allow_app_paths if p and os.path.exists(p)
+            _canonicalize_win32_path(p)
+            for p in allow_app_paths
+            if p and os.path.exists(p)
         ]
         self._app_id_blobs: list[POINTER(FWP_BYTE_BLOB)] = []
 
