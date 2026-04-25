@@ -126,19 +126,19 @@ in-process `EventBus` and are batched to the WebClient's
 `POST /api/v1/behavior/attempts/{id}/events:batch` endpoint every 5 seconds
 (or immediately on a `critical` event).
 
-| Event type             | Severity | What it captures |
-|------------------------|----------|------------------|
-| `FOCUS_LOSS`           | warn     | Foreground window left the kiosk (alt-tab, OS popup, second window) |
-| `FOCUS_REGAIN`         | info     | Kiosk window regained foreground |
-| `MONITOR_COUNT_CHANGE` | warn     | Number of attached displays changed (also fires on startup) |
-| `FULLSCREEN_EXIT`      | warn     | Kiosk left fullscreen (rare; the watchdog re-asserts immediately) |
-| `RENDERER_CRASH`       | critical | The web renderer subprocess died — flushed immediately |
-| `KEYSTROKE`            | info     | Every key press, batched up to 25 keys per event. Captures `{key, modifiers, foreground_proc, ts}` only — never a reconstructed string |
-| `BLOCKED_HOTKEY`       | warn     | A suppressed hotkey (Win, Alt+Tab, Ctrl+Esc, etc.) was attempted |
-| `CLIPBOARD_COPY`       | warn     | Clipboard contents changed. Stores payload length + MIME hint + 64-char preview hash, never the raw payload |
-| `VM_DETECTED`          | critical | One-shot at startup; emitted only if VM/VDI indicators (CPUID hypervisor bit, BIOS strings, drivers, hostname patterns) match |
-| `SUSPICIOUS_PROCESS`   | warn     | Background scan (every 15 s) detected a known screen-share / remote-control / cheating tool (OBS, AnyDesk, TeamViewer, Parsec, etc.) |
-| `WARNING_DELIVERED`    | info     | Confirms a teacher warning was rendered on the candidate's screen |
+| Event type             | Severity         | What it captures |
+|------------------------|------------------|------------------|
+| `FOCUS_LOSS`           | critical / info  | Foreground window left the kiosk. **critical** if the new foreground is any non-system process (browser, AI helper, comm app, remote-control tool, or unknown third-party app). **info** for unavoidable OS popups (UAC, login screen, taskbar shell host). The kiosk's own dialogs are filtered out and never emit FOCUS_LOSS. |
+| `FOCUS_REGAIN`         | info             | Kiosk window regained foreground |
+| `MONITOR_COUNT_CHANGE` | warn / info      | Number of attached displays changed. Only emitted on a *real* transition (the first observation establishes the baseline silently). `warn` when count > 1, `info` when reverting to a single display. Payload includes `previous_count → count`. |
+| `FULLSCREEN_EXIT`      | warn             | Kiosk left fullscreen (rare; the watchdog re-asserts immediately) |
+| `RENDERER_CRASH`       | critical         | The web renderer subprocess died — flushed immediately |
+| `KEYSTROKE`            | info             | Every key press, batched up to 25 keys per event. Captures `{key, modifiers, foreground_proc, ts}` only — never a reconstructed string |
+| `BLOCKED_HOTKEY`       | warn             | A suppressed hotkey (Win, Alt+Tab, Ctrl+Esc, etc.) was attempted |
+| `CLIPBOARD_COPY`       | info / warn      | Clipboard contents changed. `warn` for payloads ≥ 200 chars (likely answer dump), `info` for shorter selections. Stores payload length + MIME hint + preview hash, never the raw payload. The signature is seeded with the pre-launch clipboard so stale content doesn't trigger a false copy event. |
+| `VM_DETECTED`          | critical         | One-shot at startup; emitted only if VM/VDI indicators (CPUID hypervisor bit, BIOS strings, drivers, hostname patterns) match |
+| `SUSPICIOUS_PROCESS`   | critical / warn  | Background scan (every 15 s). **critical** for high-confidence cheating infrastructure: remote-desktop tools (AnyDesk, TeamViewer, RustDesk, HelpWire, Splashtop, Parsec, Chrome Remote Desktop, Quick Assist, Ammyy, Supremo, LiteManager, Radmin, DameWare, ISL Light, Jump Desktop, NinjaRMM, Atera, ConnectWise, ScreenConnect, ZohoAssist, GoToMyPC, NoMachine, MeshCentral, AweRay, AnyViewer, ShowMyPC, AeroAdmin, NetSupport, VNC servers); tunnels (ngrok, cloudflared, tailscale, zerotier, hamachi, wireguard, openvpn, frp, playit, localxpose); cheat tools (Cheat Engine, ArtMoney, x64dbg, OllyDbg, IDA, Ghidra, WPE Pro); network sniffers (Wireshark, Fiddler, Charles, Burp). **warn** for dual-use apps (Discord, Slack, Zoom, Teams, OBS, AutoHotkey, ChatGPT desktop, etc.). |
+| `WARNING_DELIVERED`    | info             | Confirms a teacher warning was rendered on the candidate's screen |
 
 The teacher live monitoring page (`/portal/live`) computes a per-attempt
 **risk score** from a sliding 60-second window of these events using the

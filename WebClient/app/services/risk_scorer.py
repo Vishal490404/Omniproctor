@@ -32,7 +32,14 @@ from app.models.behavior_event import BehaviorEvent, BehaviorEventType
 EVENT_WEIGHTS: dict[BehaviorEventType, int] = {
     # Persistent / one-shot serious indicators
     BehaviorEventType.VM_DETECTED: 30,
-    BehaviorEventType.SUSPICIOUS_PROCESS: 20,
+    # SUSPICIOUS_PROCESS now arrives in two tiers - the kiosk emits
+    # `severity="critical"` for high-confidence cheating tools (remote
+    # desktops, tunnel daemons) and `severity="warn"` for dual-use apps
+    # (Discord, OBS, ChatGPT desktop, ...). The base weight here is the
+    # warn-tier value; the severity-escalation logic in score_from_events
+    # bumps the critical-tier hits to 25+ and pins the score to the
+    # critical band via CRITICAL_FLOOR.
+    BehaviorEventType.SUSPICIOUS_PROCESS: 12,
     BehaviorEventType.MONITOR_COUNT_CHANGE: 15,
     BehaviorEventType.RENDERER_CRASH: 10,
     BehaviorEventType.FULLSCREEN_EXIT: 8,

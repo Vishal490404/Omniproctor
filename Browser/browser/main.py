@@ -1070,10 +1070,116 @@ class SecureBrowser(QMainWindow):
                 return
 
             if fg_hwnd != state["last_hwnd"]:
+                proc_lower = (fg_proc or "").lower()
+
+                # Suppress: our OWN process. The kiosk shows native
+                # message boxes (Exit Secure Session, monitor violation,
+                # camera prompt, etc.) and renderer dialogs which run in
+                # the same process but on different HWNDs. Treating them
+                # as focus loss generates noisy false positives - so we
+                # silently update state and bail.
+                try:
+                    own_proc = os.path.basename(sys.executable or "").lower()
+                except Exception:
+                    own_proc = ""
+                # Both pythonw.exe (dev) and the frozen kiosk binary
+                # should be treated as "us".
+                own_proc_set = {own_proc} if own_proc else set()
+                own_proc_set.update({"pythonw.exe", "python.exe"})
+                if proc_lower in own_proc_set:
+                    state["last_hwnd"] = fg_hwnd
+                    state["last_title"] = fg_title
+                    state["last_proc"] = fg_proc
+                    return
+
                 print(
                     f"[focus] external window in foreground: hwnd={fg_hwnd} "
                     f"proc={fg_proc!r} title={fg_title!r}"
                 )
+
+                # Severity policy for an *external* foreground window in
+                # a locked-down kiosk:
+                #
+                #   critical - browsers, AI helpers, comm apps, remote-
+                #              desktop tools. These are the actual cheating
+                #              surface; auto-pin the candidate to the
+                #              critical risk band.
+                #
+                #   critical - any other unknown window. The kiosk filters
+                #              out its own HWND + the system-popup
+                #              allowlist below, so anything that gets here
+                #              is a genuine third-party app stealing focus
+                #              during an exam. Treat it as critical by
+                #              default; operators can add benign apps to
+                #              fls_info via env var if needed.
+                #
+                #   info     - unavoidable OS popups (UAC, lock screen,
+                #              credential UI, taskbar shell host, search
+                #              flyout). Logged for completeness, never
+                #              raise the score.
+                fls_critical_known = {
+                    # Browsers
+                    "chrome.exe", "msedge.exe", "firefox.exe",
+                    "brave.exe", "opera.exe", "operagx.exe",
+                    "vivaldi.exe", "arc.exe", "iexplore.exe",
+                    "safari.exe", "tor.exe", "torbrowser.exe",
+                    # AI desktop helpers
+                    "chatgpt.exe", "claude.exe", "perplexity.exe",
+                    "copilot.exe", "monica.exe", "phind.exe",
+                    "you.exe", "pi.exe",
+                    # Communication apps
+                    "discord.exe", "discordcanary.exe", "discordptb.exe",
+                    "slack.exe", "telegram.exe", "telegramdesktop.exe",
+                    "whatsapp.exe", "msteams.exe", "ms-teams.exe",
+                    "teams.exe", "zoom.exe", "skype.exe",
+                    # Remote control / streaming
+                    "anydesk.exe", "teamviewer.exe", "rustdesk.exe",
+                    "rustdesk-host.exe", "helpwire.exe",
+                    "helpwire-host.exe", "helpwireviewer.exe",
+                    "parsec.exe", "parsecd.exe", "obs64.exe",
+                    "obs.exe", "obs32.exe", "splashtop.exe",
+                    "srclient.exe", "logmein.exe",
+                    "chrome_remote_desktop.exe", "remoting_host.exe",
+                    "anyviewer.exe", "aweray-remote.exe",
+                    "showmypc.exe", "vncviewer.exe", "tvnviewer.exe",
+                    "winvnc.exe", "tightvnc.exe",
+                }
+                fls_info = {
+                    "consent.exe", "credentialuihost.exe",
+                    "lockapp.exe", "logonui.exe",
+                    "applicationframehost.exe",
+                    # Brief OS popups
+                    "shellexperiencehost.exe", "searchhost.exe",
+                    "startmenuexperiencehost.exe",
+                    "windowsterminal.exe",
+                    "textinputhost.exe",
+                    "systemsettings.exe",
+                }
+
+                # Operator overrides via env vars - comma-separated
+                # process basenames.
+                try:
+                    extra_info = {
+                        p.strip().lower()
+                        for p in os.environ.get(
+                            "KIOSK_FOCUS_INFO_EXTRA", ""
+                        ).split(",")
+                        if p.strip()
+                    }
+                    fls_info.update(extra_info)
+                except Exception:
+                    pass
+
+                if proc_lower in fls_critical_known:
+                    severity = "critical"
+                    classification = "browser_or_ai_or_remote"
+                elif proc_lower in fls_info:
+                    severity = "info"
+                    classification = "system_popup"
+                else:
+                    severity = "critical"
+                    classification = "unknown_external"
+
                 bus.emit(
                     "FOCUS_LOSS",
                     payload={
@@ -1081,8 +1187,9 @@ class SecureBrowser(QMainWindow):
                         "proc": fg_proc,
                         "title": fg_title[:200] if fg_title else "",
                         "state": "out_of_focus",
+                        "classification": classification,
                     },
-                    severity="warn",
+                    severity=severity,
                 )
             state["last_hwnd"] = fg_hwnd
             state["last_title"] = fg_title
@@ -1197,6 +1304,12 @@ class SecureBrowser(QMainWindow):
                         )
                     except Exception:
                         continue
+                if count > prev and count > 1:
+                    severity = "critical"
+                elif count > 1:
+                    severity = "warn"
+                else:
+                    severity = "info"
                 get_event_bus().emit(
                     "MONITOR_COUNT_CHANGE",
                     payload={
@@ -1204,7 +1317,7 @@ class SecureBrowser(QMainWindow):
                         "count": count,
                         "screens": screen_meta,
                     },
-                    severity="warn" if count > 1 else "info",
+                    severity=severity,
                 )
             except Exception:
                 pass
