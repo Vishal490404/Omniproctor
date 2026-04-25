@@ -17,14 +17,17 @@ dependencies = [
     "ruff>=0.14.0",
 ]
 
-# Build-time tooling. Install with `uv sync --extra build` before running
-# `uv run pyinstaller OmniProctorBrowser.spec`. Keeping pyinstaller in the
-# project metadata (rather than `pip install pyinstaller` globally)
-# guarantees it executes inside the venv that has PyQt6 installed; if it
-# runs against any other interpreter the resulting EXE ships *without*
-# PyQt6 and crashes on first launch with
-# `ModuleNotFoundError: No module named 'PyQt6'`.
-[project.optional-dependencies]
+# Build-time tooling, kept out of the runtime install. Install with
+#     uv sync --group build
+# before running
+#     uv run pyinstaller OmniProctorBrowser.spec
+#
+# Keeping pyinstaller in the project metadata (rather than
+# `pip install pyinstaller` globally) guarantees it executes inside the
+# same venv that has PyQt6 installed. If it runs against any other
+# interpreter, the resulting EXE ships WITHOUT PyQt6 and crashes on
+# first launch with `ModuleNotFoundError: No module named 'PyQt6'`.
+[dependency-groups]
 build = [
     "pyinstaller>=6.10.0",
 ]
