@@ -18,10 +18,35 @@ app.add_middleware(
 )
 
 
+NEW_BEHAVIOR_EVENT_VALUES: tuple[str, ...] = (
+    "FOCUS_LOSS",
+    "FOCUS_REGAIN",
+    "MONITOR_COUNT_CHANGE",
+    "KEYSTROKE",
+    "BLOCKED_HOTKEY",
+    "CLIPBOARD_COPY",
+    "CLIPBOARD_PASTE",
+    "VM_DETECTED",
+    "SUSPICIOUS_PROCESS",
+    "NETWORK_BLOCKED",
+    "FULLSCREEN_EXIT",
+    "RENDERER_CRASH",
+    "WARNING_DELIVERED",
+)
+
+
 def ensure_schema_compatibility() -> None:
     # Keep existing Docker volumes usable when new model columns are introduced.
     if engine.dialect.name != "postgresql":
         return
+
+    # ALTER TYPE ... ADD VALUE cannot run inside a transaction in older
+    # Postgres versions, so we use AUTOCOMMIT for the enum upgrade.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        for value in NEW_BEHAVIOR_EVENT_VALUES:
+            conn.execute(
+                text(f"ALTER TYPE behavioreventtype ADD VALUE IF NOT EXISTS '{value}'")
+            )
 
     with engine.begin() as conn:
         conn.execute(

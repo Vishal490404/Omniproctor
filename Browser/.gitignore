@@ -1,10 +1,21 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
-build/
 dist/
 wheels/
 *.egg-info
+
+# PyInstaller / Inno Setup outputs (keep the build sources tracked)
+build/Output/
+build/*.manifest
+build/*.toc
+build/*.pkg
+build/COLLECT-*/
+build/EXE-*/
+build/PKG-*/
+build/PYZ-*/
+build/Analysis-*/
+build/OmniProctorKiosk/
 
 # Virtual environments
 .venv

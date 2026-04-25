@@ -7,8 +7,10 @@ from app.api.v1.endpoints import (
     behavior,
     dashboard,
     downloads,
+    live,
     tests,
     users,
+    warnings as warnings_endpoint,
 )
 
 api_router = APIRouter()
@@ -20,3 +22,5 @@ api_router.include_router(attempts.router, prefix="/tests", tags=["attempts"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(behavior.router, prefix="/behavior", tags=["behavior"])
 api_router.include_router(downloads.router, prefix="/downloads", tags=["downloads"])
+api_router.include_router(warnings_endpoint.router, prefix="/proctor", tags=["warnings"])
+api_router.include_router(live.router, prefix="/proctor", tags=["live"])

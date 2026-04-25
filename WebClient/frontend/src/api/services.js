@@ -39,6 +39,20 @@ export const dashboardApi = {
   myTests: () => apiClient.get('/dashboard/me/tests'),
 }
 
+export const liveApi = {
+  snapshot: (testId) => apiClient.get(`/proctor/tests/${testId}/live`),
+}
+
+export const warningsApi = {
+  send: (attemptId, payload) =>
+    apiClient.post(`/proctor/attempts/${attemptId}/warnings`, payload),
+  listForAttempt: (attemptId, sinceId = 0) => {
+    const qs = sinceId ? `?since_id=${sinceId}` : ''
+    return apiClient.get(`/proctor/attempts/${attemptId}/warnings${qs}`)
+  },
+  ack: (warningId) => apiClient.post(`/proctor/warnings/${warningId}/ack`, {}),
+}
+
 export const downloadsApi = {
   getManifest: () => apiClient.get('/downloads/manifest'),
   // Streams the installer as a Blob. The Bearer token is attached by the

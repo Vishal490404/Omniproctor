@@ -4,6 +4,7 @@ from .dialogs import OmniProctorMessageBox
 from .splash import KioskSplash
 from .theme import apply_theme, asset_path
 from .top_bar import KioskTopBar
+from .warning_banner import WarningBanner
 
 __all__ = [
     "KioskTopBar",
@@ -11,4 +12,5 @@ __all__ = [
     "OmniProctorMessageBox",
     "apply_theme",
     "asset_path",
+    "WarningBanner",
 ]

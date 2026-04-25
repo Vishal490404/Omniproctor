@@ -29,6 +29,15 @@ from protocol_handler import ensure_registered, register, unregister
 from web_profile import build_kiosk_profile
 from win11_compat import harden_kiosk_window, remove_capture_protection
 from ui import KioskSplash, KioskTopBar, OmniProctorMessageBox, apply_theme
+from telemetry import (
+    BatchPoster,
+    TelemetryConfig,
+    WarningPoller,
+    configure as configure_telemetry,
+    get_config as get_telemetry_config,
+    get_event_bus,
+)
+from ui.warning_banner import WarningBanner
 
 NO_SYSTEM_LOCKDOWN_FLAG = "--no-system-lockdown"
 
@@ -373,9 +382,18 @@ class SecureBrowser(QMainWindow):
         layout.addWidget(self.top_bar)
         layout.addWidget(self.browser)
 
+        # Teacher-warning overlay banner. Sized in WarningBanner.show_warning
+        # and re-positioned on every resize.
+        self.warning_banner = WarningBanner(self.browser)
+        self.warning_banner.hide()
+
+        self._batch_poster: BatchPoster | None = None
+        self._warning_poller: WarningPoller | None = None
+
         self.setWindowFullScreen()
 
         QTimer.singleShot(0, self.start_protections_parallel)
+        QTimer.singleShot(500, self._start_telemetry_workers)
 
         # Strict single-monitor enforcement (monitor-enforce)
         QTimer.singleShot(300, self.enforce_single_monitor)
@@ -725,6 +743,14 @@ class SecureBrowser(QMainWindow):
         except Exception:
             pass
         try:
+            get_event_bus().emit(
+                "renderer_crash",
+                payload={"status": str(status), "exit_code": int(exit_code)},
+                severity="critical",
+            )
+        except Exception:
+            pass
+        try:
             self.top_bar.set_camera_status("warn", "Renderer recovered")
         except Exception:
             pass
@@ -913,9 +939,25 @@ class SecureBrowser(QMainWindow):
         self._focus_timer.timeout.connect(self._check_foreground_window)
         self._focus_timer.start()
 
+        try:
+            self._clipboard = QGuiApplication.clipboard()
+            if self._clipboard is not None:
+                self._last_clipboard_signature = ""
+                self._clipboard.dataChanged.connect(self._on_clipboard_changed)
+        except Exception as exc:
+            print(f"WARN: clipboard monitor not installed: {exc}")
+
     def check_fullscreen_mode(self):
         if not self.isFullScreen():
             print("Restoring fullscreen mode for exam security")
+            try:
+                get_event_bus().emit(
+                    "fullscreen_exit",
+                    payload={"recovered": True},
+                    severity="warn",
+                )
+            except Exception:
+                pass
             self.showFullScreen()
 
     # -------------------------
@@ -994,22 +1036,39 @@ class SecureBrowser(QMainWindow):
                 pass
 
             state = self._focus_state
+            bus = get_event_bus()
             if fg_hwnd in our_hwnds:
-                # Back in our window. Reset external streak only when we
-                # transition from "external" → "ours" so we don't spam.
                 if state["last_hwnd"] not in our_hwnds and state["last_hwnd"] != 0:
                     print(f"[focus] regained kiosk focus (was: {state['last_proc']!r})")
+                    bus.emit(
+                        "focus_regain",
+                        payload={
+                            "previous_proc": state.get("last_proc"),
+                            "previous_title": state.get("last_title"),
+                            "state": "in_focus",
+                        },
+                        severity="info",
+                    )
                 state["last_hwnd"] = fg_hwnd
                 state["last_title"] = fg_title
                 state["last_proc"] = fg_proc
                 state["external_hits"] = 0
                 return
 
-            # Foreign window.
             if fg_hwnd != state["last_hwnd"]:
                 print(
                     f"[focus] external window in foreground: hwnd={fg_hwnd} "
                     f"proc={fg_proc!r} title={fg_title!r}"
+                )
+                bus.emit(
+                    "focus_loss",
+                    payload={
+                        "hwnd": fg_hwnd,
+                        "proc": fg_proc,
+                        "title": fg_title[:200] if fg_title else "",
+                        "state": "out_of_focus",
+                    },
+                    severity="warn",
                 )
             state["last_hwnd"] = fg_hwnd
             state["last_title"] = fg_title
@@ -1031,6 +1090,45 @@ class SecureBrowser(QMainWindow):
         except Exception as exc:
             # Never let the focus poller crash the kiosk.
             print(f"WARN: focus check failed: {exc}")
+
+    def _on_clipboard_changed(self) -> None:
+        """Emit a CLIPBOARD_COPY event when the OS clipboard changes.
+
+        We never log the raw payload (privacy) - only its length, MIME hint,
+        and a 64-char preview hash. This is enough to spot a candidate
+        copying out a question stem or pasting prepared answers.
+        """
+        try:
+            cb = getattr(self, "_clipboard", None)
+            if cb is None:
+                return
+            mime = cb.mimeData()
+            if mime is None:
+                return
+            text = mime.text() if mime.hasText() else ""
+            sig = f"{len(text)}:{hash(text) & 0xFFFFFFFF}"
+            if sig == getattr(self, "_last_clipboard_signature", ""):
+                return
+            self._last_clipboard_signature = sig
+
+            preview = ""
+            if text:
+                preview = text[:64].replace("\n", " ")
+
+            get_event_bus().emit(
+                "clipboard_copy",
+                payload={
+                    "length": len(text),
+                    "has_text": mime.hasText(),
+                    "has_html": mime.hasHtml(),
+                    "has_image": mime.hasImage(),
+                    "has_urls": mime.hasUrls(),
+                    "preview": preview,
+                },
+                severity="info" if len(text) < 200 else "warn",
+            )
+        except Exception as exc:
+            print(f"WARN: clipboard handler failed: {exc}")
 
     def cleanup_blank_popups(self):
         if hasattr(self.custom_page, 'popup_windows'):
@@ -1060,6 +1158,34 @@ class SecureBrowser(QMainWindow):
             return
         count = len(screens)
         self.top_bar.set_monitor_status(count)
+
+        # Emit a MONITOR_COUNT_CHANGE event only when the count changes,
+        # not every poll, so we don't flood the bus.
+        last_count = getattr(self, "_last_monitor_count", None)
+        if last_count != count:
+            self._last_monitor_count = count
+            try:
+                screen_meta = []
+                for s in screens:
+                    try:
+                        g = s.geometry()
+                        screen_meta.append(
+                            {
+                                "name": s.name(),
+                                "size": [g.width(), g.height()],
+                                "primary": s == QGuiApplication.primaryScreen(),
+                            }
+                        )
+                    except Exception:
+                        continue
+                get_event_bus().emit(
+                    "monitor_count_change",
+                    payload={"count": count, "screens": screen_meta},
+                    severity="warn" if count > 1 else "info",
+                )
+            except Exception:
+                pass
+
         if count <= 1:
             return
 
@@ -1127,6 +1253,103 @@ class SecureBrowser(QMainWindow):
     def _on_kiosk_started(self):
         self.kiosk_active = True
         print("Kiosk protection active (keyboard + gesture blocking)")
+        try:
+            from telemetry.keystroke_logger import install as install_keylogger
+            install_keylogger()
+        except Exception as exc:
+            print(f"WARN: keystroke logger install failed: {exc}")
+
+        # One-shot VM/VDI fingerprint. Done after kiosk hooks come up so
+        # WMI calls don't compete with the splash render path.
+        try:
+            from security.vm_detect import detect_vm
+            result = detect_vm()
+            self._vm_detection = result
+            if result.is_vm:
+                print(f"[vm_detect] indicators: {result.indicators}")
+                get_event_bus().emit(
+                    "vm_detected",
+                    payload=result.to_payload(),
+                    severity="critical",
+                )
+                try:
+                    self.top_bar.set_camera_status("error", "VM detected")
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"WARN: vm_detect failed: {exc}")
+
+        # Suspicious-process scanner runs every 15s on a QTimer.
+        try:
+            from security.suspicious_procs import scan_once as _scan_procs
+            self._proc_scan_timer = QTimer(self)
+            self._proc_scan_timer.setInterval(15_000)
+            self._proc_scan_timer.timeout.connect(lambda: _scan_procs(get_event_bus().emit))
+            self._proc_scan_timer.start()
+            QTimer.singleShot(2_000, lambda: _scan_procs(get_event_bus().emit))
+        except Exception as exc:
+            print(f"WARN: suspicious-process scanner failed: {exc}")
+
+    # -------------------------
+    # Telemetry pipeline (poster + warning poller)
+    # -------------------------
+    def _start_telemetry_workers(self) -> None:
+        cfg = get_telemetry_config()
+        if not cfg.is_active:
+            print("[telemetry] inactive – BatchPoster + WarningPoller not started")
+            return
+
+        try:
+            self._batch_poster = BatchPoster(parent=self)
+            self._batch_poster.latest_warning_id_changed.connect(
+                self._on_latest_warning_id_hint
+            )
+            self._batch_poster.start()
+        except Exception as exc:
+            print(f"WARN: BatchPoster start failed: {exc}")
+            self._batch_poster = None
+
+        try:
+            self._warning_poller = WarningPoller(parent=self)
+            self._warning_poller.warning_received.connect(self._on_warning_received)
+            self._warning_poller.start()
+        except Exception as exc:
+            print(f"WARN: WarningPoller start failed: {exc}")
+            self._warning_poller = None
+
+    def _on_latest_warning_id_hint(self, warning_id: int) -> None:
+        try:
+            if self._warning_poller is not None:
+                self._warning_poller.advance_since(int(warning_id))
+        except Exception:
+            pass
+
+    def _on_warning_received(self, warning: dict) -> None:
+        """Display a teacher warning + emit a WARNING_DELIVERED event."""
+        try:
+            self.warning_banner.show_warning(warning)
+        except Exception as exc:
+            print(f"WARN: failed to render warning banner: {exc}")
+        try:
+            get_event_bus().emit(
+                "warning_delivered",
+                payload={
+                    "warning_id": warning.get("id"),
+                    "severity": warning.get("severity"),
+                    "sender": warning.get("sender_name"),
+                },
+                severity="info",
+            )
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        try:
+            if hasattr(self, "warning_banner") and self.warning_banner is not None:
+                self.warning_banner.reposition()
+        except Exception:
+            pass
+        super().resizeEvent(event)
 
     def start_network_protection_async(self):
         if self.network_worker:
@@ -1203,6 +1426,28 @@ class SecureBrowser(QMainWindow):
                 self._monitor_poll.stop()
             if hasattr(self, '_focus_timer') and self._focus_timer:
                 self._focus_timer.stop()
+            if hasattr(self, '_proc_scan_timer') and self._proc_scan_timer:
+                self._proc_scan_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            from telemetry.keystroke_logger import uninstall as uninstall_keylogger
+            uninstall_keylogger()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, '_warning_poller', None):
+                self._warning_poller.stop()
+                self._warning_poller.wait(1500)
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, '_batch_poster', None):
+                self._batch_poster.stop()
+                self._batch_poster.wait(2500)
         except Exception:
             pass
 
@@ -1374,6 +1619,19 @@ def ensure_run_as_admin():
 
 
 def resolve_target_url(argv):
+    """Resolve the launch URL and (optionally) configure telemetry.
+
+    Recognised omniproctor-browser:// query params:
+      * ``url``         (required)  – the exam page to open
+      * ``api_base``    (optional)  – e.g. https://omniproctor.local/api/v1
+      * ``attempt_id``  (optional)  – integer attempt id
+      * ``token``       (optional)  – kiosk-scoped bearer token
+      * ``test_id``, ``student_id`` (optional, informational)
+
+    When all four telemetry params are present we wire the telemetry
+    pipeline so the kiosk batch-posts events and polls for warnings.
+    Missing params silently disable telemetry (existing behaviour).
+    """
     url_args = [arg for arg in argv[1:] if not arg.startswith('--')]
     if not url_args:
         print("No launch URL provided.")
@@ -1384,6 +1642,39 @@ def resolve_target_url(argv):
     if parsed.scheme == 'omniproctor-browser' and parsed.netloc == 'open':
         query = parse_qs(parsed.query)
         encoded_target = query.get('url', [''])[0]
+
+        def _q(name: str) -> str | None:
+            v = query.get(name, [''])[0].strip()
+            return v or None
+
+        api_base = _q("api_base")
+        token = _q("token")
+        attempt_id_raw = _q("attempt_id")
+        test_id_raw = _q("test_id")
+        student_id_raw = _q("student_id")
+
+        try:
+            attempt_id = int(attempt_id_raw) if attempt_id_raw else None
+        except ValueError:
+            attempt_id = None
+
+        if api_base or attempt_id or token:
+            try:
+                configure_telemetry(
+                    api_base=api_base,
+                    attempt_id=attempt_id,
+                    auth_token=token,
+                    student_id=int(student_id_raw) if student_id_raw else None,
+                    test_id=int(test_id_raw) if test_id_raw else None,
+                )
+                cfg = get_telemetry_config()
+                print(
+                    f"[telemetry] configured (active={cfg.is_active}, "
+                    f"attempt_id={cfg.attempt_id}, api_base={cfg.api_base})"
+                )
+            except Exception as exc:
+                print(f"WARN: telemetry configuration failed: {exc}")
+
         if encoded_target:
             decoded_target = unquote(encoded_target).strip()
             if decoded_target:
@@ -1521,7 +1812,10 @@ if __name__ == "__main__":
     splash: Optional[KioskSplash] = None
     try:
         splash = KioskSplash()
-        splash.set_status("Starting OmniProctor secure browser…")
+        if get_telemetry_config().keylogger_enabled:
+            splash.set_status("All keystrokes are recorded for proctoring – starting…")
+        else:
+            splash.set_status("Starting OmniProctor secure browser…")
         splash.show()
         app.processEvents()
     except Exception as exc:

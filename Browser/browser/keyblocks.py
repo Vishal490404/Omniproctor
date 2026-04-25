@@ -5,6 +5,14 @@ import keyboard
 import signal
 import winreg
 
+try:
+    # Telemetry import is optional - keyblocks must keep working in unit
+    # tests / dev environments without the telemetry stack.
+    from telemetry.keystroke_logger import emit_blocked_hotkey as _emit_blocked_hotkey
+except Exception:  # pragma: no cover - defensive
+    def _emit_blocked_hotkey(description: str, combo: str = "") -> None:
+        return None
+
 # ---------------------------------------------------------------------------
 # Win32 broadcast helper: tell Explorer + every top-level window that we
 # changed a registry value so the live UI reloads instead of waiting for a
@@ -81,9 +89,17 @@ class KioskModeKeyBlocker:
         try:
             self.remove_keyboard_hooks()
 
+            def _make_block_callback(description: str, combo: str):
+                def _cb():
+                    try:
+                        _emit_blocked_hotkey(description, combo)
+                    except Exception:
+                        pass
+                return _cb
+
             for i in range(1, 13):  # F1-F12
                 hotkey_ref = keyboard.add_hotkey(
-                    f'f{i}', lambda: None, suppress=True)
+                    f'f{i}', _make_block_callback(f"F{i}", f"f{i}"), suppress=True)
                 if hotkey_ref:
                     self.active_hotkeys.append(hotkey_ref)
                     print(f"BLOCKED: F{i}")
@@ -161,7 +177,10 @@ class KioskModeKeyBlocker:
             for _, hotkey_combo, description in key_combinations:
                 try:
                     hotkey_ref = keyboard.add_hotkey(
-                        hotkey_combo, lambda: None, suppress=True)
+                        hotkey_combo,
+                        _make_block_callback(description, hotkey_combo),
+                        suppress=True,
+                    )
                     if hotkey_ref:
                         self.active_hotkeys.append(hotkey_ref)
                         print(f"BLOCKED: {description}")

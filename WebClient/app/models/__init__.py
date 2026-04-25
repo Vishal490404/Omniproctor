@@ -1,5 +1,6 @@
 from app.models.behavior_event import BehaviorEvent, BehaviorEventType
 from app.models.assignment import TestAssignment
+from app.models.proctor_warning import ProctorWarning
 from app.models.test import Test
 from app.models.test_attempt import AttemptStatus, TestAttempt
 from app.models.user import User, UserRole
@@ -13,4 +14,5 @@ __all__ = [
 	"AttemptStatus",
 	"BehaviorEvent",
 	"BehaviorEventType",
+	"ProctorWarning",
 ]

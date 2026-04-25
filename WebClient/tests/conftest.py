@@ -19,7 +19,9 @@ from app.api.deps import get_db  # noqa: E402
 from app.core.security import get_password_hash  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.main import app  # noqa: E402
+from app.models.assignment import TestAssignment  # noqa: E402
 from app.models.test import Test  # noqa: E402
+from app.models.test_attempt import AttemptStatus, TestAttempt  # noqa: E402
 from app.models.user import User, UserRole  # noqa: E402
 
 
@@ -164,3 +166,48 @@ def student_token(client, student_user):
 @pytest.fixture(scope="function")
 def proctor_token(client, proctor_user):
     return login_and_get_token(client, proctor_user.email, "password123")
+
+
+@pytest.fixture(scope="function")
+def assigned_attempt(db_session, sample_test, student_user):
+    """An in-progress attempt for ``student_user`` on ``sample_test``.
+
+    Mirrors what the real /attempts/start flow produces, but bypasses the
+    HTTP path so individual tests can grab an attempt id without coupling
+    to the attempt-start contract.
+    """
+    assignment = TestAssignment(test_id=sample_test.id, student_id=student_user.id)
+    db_session.add(assignment)
+    db_session.commit()
+    db_session.refresh(assignment)
+
+    attempt = TestAttempt(
+        test_id=sample_test.id,
+        student_id=student_user.id,
+        assignment_id=assignment.id,
+        status=AttemptStatus.IN_PROGRESS,
+    )
+    db_session.add(attempt)
+    db_session.commit()
+    db_session.refresh(attempt)
+    return attempt
+
+
+@pytest.fixture(scope="function")
+def other_student_user(db_session):
+    user = User(
+        full_name="Other Student",
+        email="other-student@example.com",
+        hashed_password=get_password_hash("password123"),
+        role=UserRole.STUDENT,
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    return user
+
+
+@pytest.fixture(scope="function")
+def other_student_token(client, other_student_user):
+    return login_and_get_token(client, other_student_user.email, "password123")

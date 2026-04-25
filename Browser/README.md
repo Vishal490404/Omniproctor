@@ -67,6 +67,10 @@ Useful environment variables:
 |----------------------------|--------|
 | `OMNIPROCTOR_DEV=1`        | Enable insecure dev relaxations (`--ignore-certificate-errors`, etc.) |
 | `OMNIPROCTOR_WFP_NO_BLOCK=1` | Diagnostic: skip the catch-all WFP BLOCK rule |
+| `KIOSK_DISABLE_KEYLOGGER=1`  | Developer opt-out for the full keystroke recorder (telemetry still emits other events) |
+| `OMNIPROCTOR_TELEMETRY_API` | Override the telemetry API base URL (normally embedded in the launch URL) |
+| `OMNIPROCTOR_TELEMETRY_TOKEN` | Override the telemetry bearer token (normally embedded in the launch URL) |
+| `OMNIPROCTOR_ATTEMPT_ID`     | Override the active attempt id used by the telemetry pipeline |
 
 ## Building the installer
 
@@ -112,6 +116,63 @@ Authenticated users can then download it from `/portal/downloads` (admin /
 teacher) or `/student/downloads` (student) inside the WebClient frontend.
 The WebClient backend serves the installer through
 `GET /api/v1/downloads/installer/windows`.
+
+## Proctoring data captured
+
+When the kiosk is launched via `omniproctor-browser://...?api_base=&attempt_id=&token=&...`
+(the WebClient does this automatically), a background telemetry pipeline runs
+in addition to the kiosk lockdown. All emissions go through a thread-safe
+in-process `EventBus` and are batched to the WebClient's
+`POST /api/v1/behavior/attempts/{id}/events:batch` endpoint every 5 seconds
+(or immediately on a `critical` event).
+
+| Event type             | Severity | What it captures |
+|------------------------|----------|------------------|
+| `FOCUS_LOSS`           | warn     | Foreground window left the kiosk (alt-tab, OS popup, second window) |
+| `FOCUS_REGAIN`         | info     | Kiosk window regained foreground |
+| `MONITOR_COUNT_CHANGE` | warn     | Number of attached displays changed (also fires on startup) |
+| `FULLSCREEN_EXIT`      | warn     | Kiosk left fullscreen (rare; the watchdog re-asserts immediately) |
+| `RENDERER_CRASH`       | critical | The web renderer subprocess died — flushed immediately |
+| `KEYSTROKE`            | info     | Every key press, batched up to 25 keys per event. Captures `{key, modifiers, foreground_proc, ts}` only — never a reconstructed string |
+| `BLOCKED_HOTKEY`       | warn     | A suppressed hotkey (Win, Alt+Tab, Ctrl+Esc, etc.) was attempted |
+| `CLIPBOARD_COPY`       | warn     | Clipboard contents changed. Stores payload length + MIME hint + 64-char preview hash, never the raw payload |
+| `VM_DETECTED`          | critical | One-shot at startup; emitted only if VM/VDI indicators (CPUID hypervisor bit, BIOS strings, drivers, hostname patterns) match |
+| `SUSPICIOUS_PROCESS`   | warn     | Background scan (every 15 s) detected a known screen-share / remote-control / cheating tool (OBS, AnyDesk, TeamViewer, Parsec, etc.) |
+| `WARNING_DELIVERED`    | info     | Confirms a teacher warning was rendered on the candidate's screen |
+
+The teacher live monitoring page (`/portal/live`) computes a per-attempt
+**risk score** from a sliding 60-second window of these events using the
+documented weight table in
+[`WebClient/app/services/risk_scorer.py`](../WebClient/app/services/risk_scorer.py).
+When the score crosses the configured threshold (default 50) the page raises
+an auto-popup notification with a "Send Warning" shortcut that pre-opens the
+warning composer with a templated message.
+
+### Privacy notice (full keystroke capture)
+
+The kiosk performs **full keystroke capture** during proctored sessions. The
+splash screen surfaces this clearly with a one-line consent notice
+("All keystrokes are recorded for proctoring"). Storage is metadata-only
+(`{key, modifiers, foreground_proc, ts}`) — accidental log dumps will not
+trivially leak typed answer text — but the recording itself is exhaustive.
+For local development, set `KIOSK_DISABLE_KEYLOGGER=1` to skip the recorder
+(other telemetry monitors keep running).
+
+### Manual smoke checklist
+
+After every release build, on the target Windows host:
+
+1. Launch via `omniproctor-browser://...` from the WebClient → kiosk opens
+   fullscreen and a `MONITOR_COUNT_CHANGE` event appears in the live
+   monitoring page within ~5 seconds.
+2. Alt-Tab away → `FOCUS_LOSS` event arrives, page risk band turns warn.
+3. Press a blocked hotkey (Win key) → `BLOCKED_HOTKEY` event arrives.
+4. Copy text in the page → `CLIPBOARD_COPY` event arrives with payload length
+   only (verify no plaintext leaked).
+5. From the live page, send a warning → kiosk shows the slide-down banner
+   within 3 seconds and `WARNING_DELIVERED` confirms the round trip.
+6. End session → Task Manager and gestures are restored within 1 second
+   (verify `Ctrl+Shift+Esc` opens Task Manager again).
 
 ## Code signing (out of scope, but recommended)
 

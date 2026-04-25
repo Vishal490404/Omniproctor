@@ -1,6 +1,7 @@
 import {
   IconChevronLeft,
   IconChevronRight,
+  IconActivityHeartbeat,
   IconDashboard,
   IconDeviceDesktopAnalytics,
   IconDownload,
@@ -33,6 +34,7 @@ export function AppShellLayout({ children }) {
       ]
     : [
         { to: '/portal/tests', label: 'Tests', icon: IconFileDescription },
+        { to: '/portal/live', label: 'Live Monitoring', icon: IconActivityHeartbeat },
         { to: '/portal/students', label: 'Students', icon: IconUsers },
         { to: '/portal/logs', label: 'Behavior Logs', icon: IconDeviceDesktopAnalytics },
         { to: '/portal/downloads', label: 'Downloads', icon: IconDownload },

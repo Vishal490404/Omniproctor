@@ -1,10 +1,12 @@
 from datetime import datetime, timezone
+from typing import Iterable
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.models.behavior_event import BehaviorEvent
 from app.models.test_attempt import TestAttempt
+from app.schemas.behavior import BehaviorEventCreateRequest
 
 
 def create_behavior_event(
@@ -38,6 +40,41 @@ def get_attempt_or_404(db: Session, attempt_id: int) -> TestAttempt:
     if not attempt:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found")
     return attempt
+
+
+def create_behavior_events_bulk(
+    db: Session,
+    attempt: TestAttempt,
+    events: Iterable[BehaviorEventCreateRequest],
+) -> int:
+    """Insert a batch of events in a single commit. Returns count inserted.
+
+    Silently drops malformed entries (e.g. unknown event_type slipping in
+    after the kiosk + server fall out of sync) so a single bad event
+    doesn't reject the whole batch.
+    """
+    now = datetime.now(timezone.utc)
+    rows: list[BehaviorEvent] = []
+    for ev in events:
+        try:
+            rows.append(
+                BehaviorEvent(
+                    attempt_id=attempt.id,
+                    test_id=attempt.test_id,
+                    student_id=attempt.student_id,
+                    event_type=ev.event_type,
+                    payload=ev.payload,
+                    severity=ev.severity,
+                    event_time=ev.event_time or now,
+                )
+            )
+        except Exception:
+            continue
+    if not rows:
+        return 0
+    db.add_all(rows)
+    db.commit()
+    return len(rows)
 
 
 def list_events_for_attempt(db: Session, attempt_id: int) -> list[BehaviorEvent]:

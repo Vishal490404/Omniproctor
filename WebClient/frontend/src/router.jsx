@@ -6,6 +6,7 @@ import { useAuth } from './context/AuthContext'
 import { BehaviorLogsPage } from './pages/BehaviorLogsPage'
 import { DownloadsPage } from './pages/DownloadsPage'
 import { ForbiddenPage } from './pages/ForbiddenPage'
+import { LiveMonitoringPage } from './pages/LiveMonitoringPage'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { StudentDashboardPage } from './pages/StudentDashboardPage'
@@ -34,6 +35,7 @@ export function AppRouter() {
             <AppShellLayout>
               <Routes>
                 <Route path="tests" element={<TestsPage />} />
+                <Route path="live" element={<LiveMonitoringPage />} />
                 <Route path="students" element={<StudentsPage />} />
                 <Route path="logs" element={<BehaviorLogsPage />} />
                 <Route path="downloads" element={<DownloadsPage />} />

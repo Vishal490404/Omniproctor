@@ -2,14 +2,21 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.api.deps import AdminTeacherProctor, CurrentUser, DBSession, StudentOnly
 from app.models.user import UserRole
-from app.schemas.behavior import BehaviorEventCreateRequest, BehaviorEventResponse
+from app.schemas.behavior import (
+    BehaviorEventBatchRequest,
+    BehaviorEventBatchResponse,
+    BehaviorEventCreateRequest,
+    BehaviorEventResponse,
+)
 from app.services.behavior_service import (
     create_behavior_event,
+    create_behavior_events_bulk,
     get_attempt_or_404,
     list_events_for_attempt,
     list_events_for_test_student,
 )
 from app.services.test_service import ensure_manage_permission, get_test_or_404
+from app.services.warning_service import latest_warning_id_for_attempt
 
 router = APIRouter()
 
@@ -32,6 +39,42 @@ def ingest_behavior_event(
         payload.payload,
         payload.severity,
         payload.event_time,
+    )
+
+
+@router.post(
+    "/attempts/{attempt_id}/events:batch",
+    response_model=BehaviorEventBatchResponse,
+)
+def ingest_behavior_events_batch(
+    attempt_id: int,
+    payload: BehaviorEventBatchRequest,
+    db: DBSession,
+    current_user: StudentOnly,
+):
+    """Bulk ingestion path used by the kiosk's BatchPoster.
+
+    Capped at ``MAX_BATCH_SIZE`` events per call (validated by the schema).
+    Returns the latest warning id known for the attempt so the kiosk can
+    dedup its warning poll without an extra round-trip.
+    """
+    attempt = get_attempt_or_404(db, attempt_id)
+    if attempt.student_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot log events for another student",
+        )
+
+    accepted = 0
+    rejected = 0
+    if payload.events:
+        accepted = create_behavior_events_bulk(db, attempt, payload.events)
+        rejected = len(payload.events) - accepted
+
+    return BehaviorEventBatchResponse(
+        accepted=accepted,
+        rejected=rejected,
+        latest_warning_id=latest_warning_id_for_attempt(db, attempt_id),
     )
 
 
