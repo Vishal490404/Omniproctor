@@ -446,40 +446,70 @@ class WfpNativeFirewallController(FirewallControllerBase):
         process's exe — not the parent — so unless this path is in our allow
         list, every TCP connection initiated by the embedded browser is blocked.
         """
+        names = ("QtWebEngineProcess.exe", "QtWebEngineProcess")
         candidates: list[str] = []
 
+        # 1) Authoritative: ask the running PyQt6 itself where it stores
+        #    helper binaries. This works both in a venv and system Python.
         try:
             from PyQt6.QtCore import QLibraryInfo  # type: ignore
 
-            for attr in ("LibraryExecutablesPath", "BinariesPath"):
+            for attr in ("LibraryExecutablesPath", "BinariesPath", "PrefixPath", "DataPath"):
                 try:
                     p = QLibraryInfo.path(getattr(QLibraryInfo.LibraryPath, attr))
                     if p:
                         candidates.append(p)
+                        candidates.append(os.path.join(p, "bin"))
+                        candidates.append(os.path.join(p, "libexec"))
                 except Exception:
                     continue
         except Exception:
             pass
 
+        # 2) Search every importable PyQt6 install for Qt6/bin.
         try:
-            base = os.path.dirname(os.path.abspath(sys.executable))
-        except Exception:
-            base = ""
-        if base:
-            candidates.extend(
-                [
-                    base,
-                    os.path.join(base, "PyQt6", "Qt6", "bin"),
-                    os.path.join(base, "_internal", "PyQt6", "Qt6", "bin"),
-                    os.path.join(base, "Lib", "site-packages", "PyQt6", "Qt6", "bin"),
-                ]
-            )
+            import PyQt6  # type: ignore
 
+            for module_path in getattr(PyQt6, "__path__", []) or []:
+                candidates.append(os.path.join(module_path, "Qt6", "bin"))
+        except Exception:
+            pass
+
+        # 3) Walk sys.path for any directory that contains a PyQt6 layout
+        #    (covers exotic packagings PyInstaller / cx_Freeze produce).
+        for entry in sys.path:
+            if not entry:
+                continue
+            candidates.append(os.path.join(entry, "PyQt6", "Qt6", "bin"))
+
+        # 4) Frozen-build fallbacks relative to sys.executable.
+        try:
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        except Exception:
+            exe_dir = ""
+        if exe_dir:
+            for relpath in (
+                "",
+                "PyQt6/Qt6/bin",
+                "_internal/PyQt6/Qt6/bin",
+                "Lib/site-packages/PyQt6/Qt6/bin",
+                "../Lib/site-packages/PyQt6/Qt6/bin",
+            ):
+                candidates.append(os.path.normpath(os.path.join(exe_dir, relpath)))
+
+        seen: set[str] = set()
         for d in candidates:
-            for name in ("QtWebEngineProcess.exe", "QtWebEngineProcess"):
+            if not d:
+                continue
+            d_norm = os.path.normcase(os.path.abspath(d))
+            if d_norm in seen:
+                continue
+            seen.add(d_norm)
+            for name in names:
                 p = os.path.join(d, name)
                 if os.path.isfile(p):
                     return p
+
         return None
 
     def _build_allow_paths(self) -> list[str]:

@@ -32,9 +32,6 @@ Thumbs.db
 .git
 .gitignore
 
-# Note: do NOT ignore README.md / other *.md files. pyproject.toml references
-# `readme = "README.md"`, so hatchling fails the editable build at container
-# start (uv sync) when the file is missing from /app.
 
 # Docker meta - no need to copy into context
 Dockerfile

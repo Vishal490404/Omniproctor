@@ -22,6 +22,7 @@ from keyblocks import (
     start_exam_kiosk_mode,
     stop_exam_kiosk_mode,
 )
+from log_setup import configure_file_logging
 from network.native_firewall_controller import NativeFirewallController, emergency_firewall_cleanup
 from protocol_handler import ensure_registered, register, unregister
 
@@ -686,12 +687,17 @@ class SecureBrowser(QMainWindow):
     def _show_network_failure_dialog(self, reason: str):
         if self._shutdown_started:
             return
+        try:
+            from log_setup import get_log_path
+            _log_hint = f"\n\nFull log: {get_log_path()}"
+        except Exception:
+            _log_hint = ""
         QMessageBox.critical(
             self,
             "Network Protection Failed",
             "Secure traffic blocking could not be activated.\n\n"
             "The exam session cannot continue without network protection.\n\n"
-            f"Details: {reason}",
+            f"Details: {reason}{_log_hint}",
         )
         self.safe_exit()
 
@@ -859,6 +865,15 @@ def resolve_target_url(argv):
 
 
 if __name__ == "__main__":
+    # Configure logging before anything else so stdout-less launches
+    # (pythonw.exe / protocol handler / frozen exe) still produce a
+    # diagnosable log file on disk.
+    try:
+        _log_path = configure_file_logging()
+        print(f"[omniproctor] Log file: {_log_path}")
+    except Exception as _exc:
+        print(f"[omniproctor] WARNING: file logging setup failed: {_exc}", file=sys.stderr)
+
     if "--register-protocol" in sys.argv:
         sys.exit(0 if register() else 1)
     if "--unregister-protocol" in sys.argv:
