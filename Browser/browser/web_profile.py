@@ -68,14 +68,20 @@ def _downloads_dir() -> Path:
 
 
 def _apply_persistent_permissions_policy(profile: QWebEngineProfile) -> None:
-    """Best-effort: persist per-origin permission grants on Qt 6.8+."""
+    """Force the safe ``AskEveryTime`` policy on Qt 6.8+.
+
+    We intentionally do NOT enable ``StoreOnDisk`` here: combined with the
+    legacy ``featurePermissionRequested`` signal we still rely on, PyQt6
+    6.10 on Windows has been observed to hard-crash the whole process
+    when the first ``setFeaturePermission`` call lands. Our Python-side
+    handler auto-grants every request anyway, so re-asking each session
+    is invisible to the candidate.
+    """
     try:
         policy_enum = QWebEngineProfile.PersistentPermissionsPolicy
-        profile.setPersistentPermissionsPolicy(policy_enum.StoreOnDisk)
-        logger.debug("Persistent permissions policy set to StoreOnDisk")
+        profile.setPersistentPermissionsPolicy(policy_enum.AskEveryTime)
+        logger.debug("Persistent permissions policy forced to AskEveryTime")
     except (AttributeError, TypeError):
-        # Older PyQt6/Qt6 versions don't expose this; the in-Python
-        # auto-grant in main.py still covers the runtime case.
         logger.debug("PersistentPermissionsPolicy not available on this Qt build")
 
 

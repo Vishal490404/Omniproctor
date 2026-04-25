@@ -217,6 +217,10 @@ class SecureBrowser(QMainWindow):
         self.custom_page = CustomWebEnginePage(self.profile, self.browser)
         self.custom_page.featurePermissionRequested.connect(self.handle_permission_request)
         self.custom_page.fullScreenRequested.connect(self.handle_fullscreen_request)
+        try:
+            self.custom_page.renderProcessTerminated.connect(self._on_render_process_terminated)
+        except Exception as exc:
+            print(f"WARN: could not bind renderProcessTerminated: {exc}")
 
         self.browser.setPage(self.custom_page)
         self.browser.setUrl(QUrl("about:blank"))
@@ -480,7 +484,31 @@ class SecureBrowser(QMainWindow):
     # -------------------------
     # Permissions / fullscreen
     # -------------------------
+    def _on_render_process_terminated(self, status, exit_code):
+        """Survive a renderer/GPU crash without taking the kiosk down.
+
+        The most common trigger is a media-stack fault when the camera or
+        microphone first initialises. We log it, surface it on the top bar,
+        and try to reload the page so the candidate can keep going.
+        """
+        try:
+            print(f"WARN: render process terminated (status={status}, exit_code={exit_code})")
+        except Exception:
+            pass
+        try:
+            self.top_bar.set_camera_status("warn", "Renderer recovered")
+        except Exception:
+            pass
+        try:
+            QTimer.singleShot(750, lambda: self.browser.reload())
+        except Exception:
+            pass
+
     def handle_permission_request(self, origin, feature):
+        # Wrap the entire grant path in try/except: any uncaught exception
+        # raised on a Qt slot leaves Qt's C++ stack in an indeterminate state
+        # and can hard-crash the kiosk (taking the firewall + kiosk-mode
+        # registry state down with it because atexit handlers never run).
         feature_names = {
             QWebEnginePage.Feature.MediaAudioCapture: "Microphone",
             QWebEnginePage.Feature.MediaVideoCapture: "Camera",
@@ -491,23 +519,34 @@ class SecureBrowser(QMainWindow):
             QWebEnginePage.Feature.Notifications: "Notifications",
         }
         feature_name = feature_names.get(feature, f"Unknown Feature ({feature})")
-        print(f"Permission requested: {feature_name} from {origin.toString()}")
+        origin_str = ""
+        try:
+            origin_str = origin.toString()
+        except Exception:
+            origin_str = "<unknown origin>"
+        print(f"Permission requested: {feature_name} from {origin_str}")
 
-        self.custom_page.setFeaturePermission(
-            origin,
-            feature,
-            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
-        )
-        self._granted_permission_origins.add((origin.toString(), int(feature)))
-        print(f"{feature_name} permission granted automatically")
+        try:
+            self.custom_page.setFeaturePermission(
+                origin,
+                feature,
+                QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
+            )
+            self._granted_permission_origins.add((origin_str, int(feature)))
+            print(f"{feature_name} permission granted automatically")
+        except Exception as exc:
+            print(f"WARN: setFeaturePermission failed for {feature_name}: {exc}")
 
-        if feature in (
-            QWebEnginePage.Feature.MediaVideoCapture,
-            QWebEnginePage.Feature.MediaAudioVideoCapture,
-        ):
-            self.top_bar.set_camera_status("ok", "Camera ON")
-        elif feature == QWebEnginePage.Feature.MediaAudioCapture:
-            self.top_bar.set_camera_status("ok", "Microphone ON")
+        try:
+            if feature in (
+                QWebEnginePage.Feature.MediaVideoCapture,
+                QWebEnginePage.Feature.MediaAudioVideoCapture,
+            ):
+                self.top_bar.set_camera_status("ok", "Camera ON")
+            elif feature == QWebEnginePage.Feature.MediaAudioCapture:
+                self.top_bar.set_camera_status("ok", "Microphone ON")
+        except Exception as exc:
+            print(f"WARN: top bar camera status update failed: {exc}")
 
     def handle_fullscreen_request(self, request):
         print(f"Fullscreen request from: {request.origin().toString()}")
@@ -773,6 +812,32 @@ def _atexit_cleanup():
 
 
 atexit.register(_atexit_cleanup)
+
+
+def _emergency_excepthook(exc_type, exc_value, exc_tb):
+    """Catch unhandled exceptions, run cleanup, then re-raise.
+
+    Without this, an uncaught exception on a Qt slot can leave the WFP
+    filters and Task Manager registry policy in their locked-down state.
+    """
+    try:
+        import traceback
+        sys.stderr.write("=== UNHANDLED KIOSK EXCEPTION ===\n")
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+    except Exception:
+        pass
+    try:
+        _atexit_cleanup()
+    except Exception:
+        pass
+    # Defer to the previous hook so the process still exits non-zero.
+    try:
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+    except Exception:
+        pass
+
+
+sys.excepthook = _emergency_excepthook
 
 
 # -------------------------
