@@ -1451,6 +1451,17 @@ class SecureBrowser(QMainWindow):
         except Exception:
             pass
 
+        # Tell the WebClient the attempt is over so the row flips from
+        # IN_PROGRESS to COMPLETED. Strictly best-effort: we only run it
+        # when telemetry was configured (i.e. launched from the dashboard
+        # with api_base + token + test_id), and we never let a network
+        # error block shutdown.
+        try:
+            from telemetry import post_attempt_end
+            post_attempt_end(reason="user_ended_session")
+        except Exception as exc:
+            print("post_attempt_end failed:", exc)
+
         if hasattr(self, 'custom_page') and hasattr(self.custom_page, 'popup_windows'):
             for popup in list(self.custom_page.popup_windows):
                 try:

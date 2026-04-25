@@ -44,6 +44,16 @@ class TelemetryConfig:
             return None
         return f"{self.api_base.rstrip('/')}/proctor/warnings/{warning_id}/ack"
 
+    def end_attempt_url(self) -> Optional[str]:
+        """POST endpoint to mark the attempt completed.
+
+        Requires ``test_id`` in addition to the usual telemetry config -
+        without it the kiosk doesn't know which test owns the attempt.
+        """
+        if not (self.api_base and self.test_id and self.auth_token):
+            return None
+        return f"{self.api_base.rstrip('/')}/tests/{self.test_id}/attempts/end"
+
 
 _singleton: Optional[TelemetryConfig] = None
 _singleton_lock = threading.Lock()

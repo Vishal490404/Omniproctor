@@ -108,28 +108,49 @@ class BatchPoster(QThread):
 
         try:
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                payload = json.loads(resp.read().decode("utf-8") or "{}")
+                raw = resp.read().decode("utf-8") or "{}"
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if "json" not in ctype:
+                    # Almost always means the kiosk is pointed at the wrong
+                    # base URL (e.g. Vite dev server returning index.html).
+                    # Surface it loudly - silent 200s with HTML are the worst
+                    # kind of telemetry failure to debug.
+                    print(
+                        f"[telemetry] BatchPoster: non-JSON {resp.status} from {url} "
+                        f"(content-type={ctype!r}) - dropping {len(events)} events. "
+                        f"Is api_base correct? It must point at the FastAPI backend, "
+                        f"NOT the Vite dev server."
+                    )
+                    return
+                payload = json.loads(raw)
+                print(
+                    f"[telemetry] BatchPoster: POST {url} -> {resp.status} "
+                    f"(accepted={payload.get('accepted')}, "
+                    f"latest_warning_id={payload.get('latest_warning_id')})"
+                )
         except urllib.error.HTTPError as http_err:
-            # 4xx ⇒ permanent (bad auth, dropped attempt). Don't requeue
-            # or we'll loop forever.
+            body_preview = ""
+            try:
+                body_preview = http_err.read().decode("utf-8", errors="replace")[:200]
+            except Exception:
+                pass
             if 400 <= http_err.code < 500:
-                logger.warning(
-                    "BatchPoster: server rejected %d events with HTTP %d - dropping",
-                    len(events),
-                    http_err.code,
+                print(
+                    f"[telemetry] BatchPoster: HTTP {http_err.code} from {url} - "
+                    f"dropping {len(events)} events. Body: {body_preview!r}"
                 )
                 return
-            logger.warning(
-                "BatchPoster: HTTP %d - requeueing %d events", http_err.code, len(events)
+            print(
+                f"[telemetry] BatchPoster: HTTP {http_err.code} from {url} - "
+                f"requeueing {len(events)} events. Body: {body_preview!r}"
             )
             self._bus.requeue(events)
             self._sleep_backoff()
             return
         except (urllib.error.URLError, TimeoutError) as net_err:
-            logger.warning(
-                "BatchPoster: network error %s - requeueing %d events",
-                net_err,
-                len(events),
+            print(
+                f"[telemetry] BatchPoster: network error {net_err} for {url} - "
+                f"requeueing {len(events)} events"
             )
             self._bus.requeue(events)
             self._sleep_backoff()
@@ -149,3 +170,55 @@ class BatchPoster(QThread):
     def _sleep_backoff(self) -> None:
         time.sleep(self._backoff)
         self._backoff = min(self._backoff * 2, MAX_BACKOFF)
+
+
+def post_attempt_end(reason: str = "user_ended_session", timeout: float = 4.0) -> bool:
+    """Best-effort POST to /tests/{test_id}/attempts/end.
+
+    Called from the kiosk's ``safe_exit`` so the WebClient flips the
+    attempt's status from IN_PROGRESS to COMPLETED. Silently returns
+    ``False`` when telemetry is not configured or the request fails so
+    shutdown is never blocked by network issues.
+    """
+    cfg = get_config()
+    url = cfg.end_attempt_url()
+    if not url:
+        print(
+            f"[telemetry] post_attempt_end: skipped - telemetry inactive "
+            f"(api_base={cfg.api_base}, test_id={cfg.test_id}, "
+            f"has_token={bool(cfg.auth_token)})"
+        )
+        return False
+
+    body = json.dumps({"reason": reason}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.auth_token}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+            print(
+                f"[telemetry] post_attempt_end: POST {url} -> {resp.status} "
+                f"(attempt {cfg.attempt_id} marked completed)"
+            )
+        return True
+    except urllib.error.HTTPError as http_err:
+        body_preview = ""
+        try:
+            body_preview = http_err.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        print(
+            f"[telemetry] post_attempt_end: HTTP {http_err.code} from {url}. "
+            f"Body: {body_preview!r}"
+        )
+        return False
+    except Exception as exc:
+        print(f"[telemetry] post_attempt_end: network error for {url}: {exc}")
+        return False

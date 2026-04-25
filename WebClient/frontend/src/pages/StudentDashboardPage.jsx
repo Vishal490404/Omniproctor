@@ -4,6 +4,7 @@ import { IconDownload } from '@tabler/icons-react'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
+import apiClient from '../api/client'
 import { attemptsApi, dashboardApi } from '../api/services'
 import { buildKioskLaunchUrl } from '../utils/browserLaunch'
 import { formatDateIST } from '../utils/time'
@@ -32,8 +33,26 @@ export function StudentDashboardPage() {
     }
 
     try {
-      await attemptsApi.start(item.id)
-      const launchUrl = buildKioskLaunchUrl(item.external_link)
+      const { data: startResponse } = await attemptsApi.start(item.id)
+      const attemptId = startResponse?.attempt?.id
+      const studentId = startResponse?.attempt?.student_id
+      const token = localStorage.getItem('wc_token') || ''
+      // IMPORTANT: derive apiBase from the same source the React app uses
+      // (apiClient.defaults.baseURL). Falling back to window.location.origin
+      // would point the kiosk at the Vite dev server (5174) instead of the
+      // FastAPI backend (8001), and every telemetry POST would 404 silently.
+      let apiBase = String(apiClient?.defaults?.baseURL || '').replace(/\/+$/, '')
+      if (!apiBase) {
+        apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001/api/v1').replace(/\/+$/, '')
+      }
+
+      const launchUrl = buildKioskLaunchUrl(item.external_link, {
+        apiBase,
+        attemptId,
+        token,
+        testId: item.id,
+        studentId,
+      })
       if (!launchUrl) {
         notifications.show({ color: 'red', title: 'Invalid test link', message: 'This test link is not valid.' })
         return
