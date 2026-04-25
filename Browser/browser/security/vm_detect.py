@@ -21,6 +21,21 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Iterable
 
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _hidden_startupinfo():
+    """Return a STARTUPINFO that hides the console window on Windows."""
+    if os.name != "nt":
+        return None
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        return si
+    except Exception:
+        return None
+
 # Substrings we look for in BIOS / motherboard / system manufacturer.
 # Lower-cased on the matching side. The list is non-exhaustive but
 # covers the common public hypervisors.
@@ -93,6 +108,8 @@ def _check_cpuid_hypervisor_bit() -> bool:
             capture_output=True,
             text=True,
             timeout=2.0,
+            creationflags=_CREATE_NO_WINDOW,
+            startupinfo=_hidden_startupinfo(),
         ).stdout.lower()
         # Hypervisor manufacturers we have seen reported by wmic.
         return any(
@@ -119,6 +136,8 @@ def _check_bios_strings() -> tuple[bool, dict]:
                 capture_output=True,
                 text=True,
                 timeout=2.0,
+                creationflags=_CREATE_NO_WINDOW,
+                startupinfo=_hidden_startupinfo(),
             ).stdout
             details[fld] = out.strip()[:400]
             blob_parts.append(out.lower())

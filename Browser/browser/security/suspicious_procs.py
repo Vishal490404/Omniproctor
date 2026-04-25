@@ -16,6 +16,21 @@ import os
 import subprocess
 from typing import Callable, Iterable
 
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _hidden_startupinfo():
+    """Return a STARTUPINFO that hides the console window on Windows."""
+    if os.name != "nt":
+        return None
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        return si
+    except Exception:
+        return None
+
 # Lower-cased process names. Keep this list maintainable; teachers can
 # extend it via the SUSPICIOUS_PROCS_EXTRA env var (comma-separated).
 _DEFAULT_SUSPICIOUS = {
@@ -60,6 +75,8 @@ def _list_running_processes() -> list[str]:
             capture_output=True,
             text=True,
             timeout=3.0,
+            creationflags=_CREATE_NO_WINDOW,
+            startupinfo=_hidden_startupinfo(),
         ).stdout
     except Exception:
         return []
