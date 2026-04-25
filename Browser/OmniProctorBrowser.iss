@@ -105,10 +105,9 @@ Root: HKCR; Subkey: "omniproctor-browser\shell\open"; ValueType: string; ValueNa
 Root: HKCR; Subkey: "omniproctor-browser\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
-; Register the URL protocol handler. This invokes the EXE - if PyInstaller
-; bundled it incorrectly (e.g. missing PyQt6) the install will surface the
-; crash here, which is intentional: better to fail loud at install time
-; than to ship a broken kiosk that crashes when a student clicks Start Test.
+; Register the URL protocol handler. The installer process is already
+; elevated (PrivilegesRequired=admin), so a plain CreateProcess works for
+; this entry and we can capture the EXE's exit code via waituntilterminated.
 ;
 ; A non-zero exit from the EXE will fail the install, prompting the user to
 ; rebuild the bundle. See README "Smoke-test the EXE before running Inno
@@ -117,21 +116,35 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--register-protocol"; \
     Flags: runhidden waituntilterminated; \
     StatusMsg: "Registering URL protocol..."
 
-; Optional post-install launch.
+; Optional post-install launch (the "Launch OmniProctor Browser" checkbox
+; on the final Setup page). MUST use shellexec because:
+;   * Inno's default is plain CreateProcess for [Run] entries, which
+;     CANNOT trigger UAC. Our EXE has requireAdministrator embedded in
+;     its manifest (uac_admin=True in the .spec), so CreateProcess fails
+;     with `ERROR_ELEVATION_REQUIRED (740)`.
+;   * shellexec routes through ShellExecuteEx, which honors the manifest
+;     and prompts the user for elevation just like a normal Start Menu
+;     launch would.
+;   * runasoriginaluser is the implicit default for `postinstall`
+;     entries - Inno deliberately drops the elevated token before
+;     launching, so the user isn't running with admin rights they didn't
+;     ask for. Combined with shellexec this gives us a clean UAC prompt.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
-    Flags: nowait postinstall skipifsilent
+    Flags: nowait postinstall skipifsilent shellexec runasoriginaluser
 
 [UninstallRun]
 ; Safety net: if the kiosk crashed mid-exam this restores the user's
 ; firewall + gestures + Task Manager state before the files are removed.
 ; --system-recover is idempotent and exits cleanly even if nothing was
 ; left over. skipifdoesntexist guards against the case where the EXE was
-; manually deleted before uninstall.
+; manually deleted before uninstall. shellexec is required for the same
+; reason as the postinstall launch: the EXE's manifest demands elevation
+; and the uninstaller may not always be running fully elevated.
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--system-recover"; \
-    Flags: runhidden waituntilterminated skipifdoesntexist; \
+    Flags: runhidden waituntilterminated skipifdoesntexist shellexec; \
     RunOnceId: "OmniProctorSystemRecover"
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--unregister-protocol"; \
-    Flags: runhidden waituntilterminated skipifdoesntexist; \
+    Flags: runhidden waituntilterminated skipifdoesntexist shellexec; \
     RunOnceId: "OmniProctorUnregister"
 
 [UninstallDelete]
