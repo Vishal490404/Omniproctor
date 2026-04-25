@@ -10,14 +10,14 @@ from urllib.parse import parse_qs, unquote, urlparse
 logger = logging.getLogger(__name__)
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QMessageBox, QVBoxLayout, QWidget,
+    QApplication, QLabel, QMainWindow, QMessageBox, QVBoxLayout, QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import (
     QWebEnginePage, QWebEngineScript
 )
-from PyQt6.QtCore import QUrl, QTimer, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import QUrl, QTimer, Qt, QThread, QEventLoop, pyqtSignal
+from PyQt6.QtGui import QGuiApplication, QFont
 
 from keyblocks import (
     install_emergency_handlers as install_keyblock_emergency_handlers,
@@ -299,6 +299,68 @@ class CustomWebEnginePage(QWebEnginePage):
 
 
 # -------------------------
+# Shutdown helpers
+# -------------------------
+def _pump_events(max_ms: int = 50) -> None:
+    """Process pending Qt events so an in-flight overlay actually paints.
+
+    Sprinkled between blocking shutdown phases (network teardown, WFP
+    cleanup, thread joins) so the "Closing session..." overlay stays
+    responsive instead of looking frozen.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return
+    try:
+        app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, max_ms)
+    except Exception:
+        pass
+
+
+class _ClosingOverlay(QWidget):
+    """Topmost translucent panel shown during End Session shutdown.
+
+    Frameless, click-through-disabled, painted in a single pass so it
+    survives even if the underlying webview is being torn down.
+    """
+
+    def __init__(self, parent_window: QMainWindow):
+        super().__init__(parent_window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            "background-color: rgba(15, 23, 42, 0.92);"
+            "color: white;"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(48, 48, 48, 48)
+        title = QLabel("Closing Secure Session")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_font = QFont()
+        title_font.setPointSize(22)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setStyleSheet("color: white;")
+
+        sub = QLabel(
+            "Saving your activity and restoring system settings.\n"
+            "This window will close in a few seconds."
+        )
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub_font = QFont()
+        sub_font.setPointSize(12)
+        sub.setFont(sub_font)
+        sub.setStyleSheet("color: rgba(255, 255, 255, 0.85);")
+
+        layout.addStretch(1)
+        layout.addWidget(title)
+        layout.addSpacing(16)
+        layout.addWidget(sub)
+        layout.addStretch(1)
+
+
+# -------------------------
 # Main Secure Browser Window
 # -------------------------
 class SecureBrowser(QMainWindow):
@@ -392,6 +454,7 @@ class SecureBrowser(QMainWindow):
 
         self._batch_poster: BatchPoster | None = None
         self._warning_poller: WarningPoller | None = None
+        self._closing_overlay: _ClosingOverlay | None = None
 
         self.setWindowFullScreen()
 
@@ -1558,11 +1621,50 @@ class SecureBrowser(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.safe_exit()
 
+    def _show_closing_overlay(self) -> None:
+        """Cover the webview with a 'Closing Secure Session' panel.
+
+        Idempotent. The overlay stays alive until QApplication.quit
+        tears the whole window down, so the user always has visual
+        feedback during shutdown.
+        """
+        if getattr(self, "_closing_overlay", None) is not None:
+            return
+        try:
+            overlay = _ClosingOverlay(self)
+            overlay.setGeometry(self.rect())
+            overlay.show()
+            overlay.raise_()
+            self._closing_overlay = overlay
+        except Exception as exc:
+            print("closing overlay failed:", exc)
+            self._closing_overlay = None
+
     def safe_exit(self):
         if self._shutdown_started:
             return
         self._shutdown_started = True
         print("Exiting secure browser – restoring system state...")
+
+        # Show an immediate "Closing session..." overlay so the UI never
+        # appears frozen during the unavoidable network + WFP teardown
+        # work below. We pump Qt events between phases so the overlay
+        # actually paints.
+        self._show_closing_overlay()
+        _pump_events()
+
+        # Tell every background thread to start unwinding RIGHT NOW so
+        # they can shut down in parallel with the rest of safe_exit
+        # (network call + WFP cleanup + popup teardown). Each thread's
+        # .wait(...) at the end of safe_exit then mostly returns
+        # immediately because we kicked the stop flag here.
+        try:
+            if getattr(self, '_warning_poller', None):
+                self._warning_poller.stop()
+            if getattr(self, '_batch_poster', None):
+                self._batch_poster.stop()
+        except Exception:
+            pass
 
         try:
             if hasattr(self, 'fullscreen_timer') and self.fullscreen_timer:
@@ -1586,57 +1688,56 @@ class SecureBrowser(QMainWindow):
 
         try:
             if getattr(self, '_warning_poller', None):
-                self._warning_poller.stop()
-                self._warning_poller.wait(1500)
+                # Already stopped above - this is just .wait(). Poller
+                # sleeps in 250 ms slices so this returns fast.
+                self._warning_poller.wait(800)
         except Exception:
             pass
 
         # IMPORTANT: post_attempt_end MUST be called BEFORE the BatchPoster
-        # is torn down. Two reasons:
-        #   1. The network stack and event loop are still healthy at this
-        #      point - we have the full timeout budget to retry transient
-        #      failures. If we wait until after the WFP cleanup runs, we
-        #      may have already restored the firewall and severed the
-        #      kiosk's outbound HTTPS path.
-        #   2. If this call fails the attempt stays IN_PROGRESS forever,
-        #      which then causes start_attempt() on the next launch to
-        #      reuse the SAME attempt_id (existing-attempt branch) and
-        #      replay every old warning. Retrying here is the cheapest
-        #      way to avoid that whole class of bug.
+        # is torn down so the network stack and outbound HTTPS path are
+        # still healthy. We deliberately keep this short (2 attempts ×
+        # 3 s = 6 s worst case) because:
+        #   1. The UI thread is blocked here and the user is waiting on
+        #      the End Session click.
+        #   2. If both attempts fail the attempt stays IN_PROGRESS, but
+        #      the server's stale-attempt auto-close (see
+        #      attempt_service.start_attempt + STALE_ATTEMPT_SECONDS)
+        #      reaps it on the next launch - so failure is recoverable.
         try:
             from telemetry import post_attempt_end
             attempt_ended = False
-            for retry in range(3):
+            for retry in range(2):
                 ok = False
                 try:
                     ok = post_attempt_end(
                         reason="user_ended_session",
-                        timeout=6.0,
+                        timeout=3.0,
                     )
                 except Exception as exc:
-                    print(f"post_attempt_end attempt {retry + 1}/3 raised: {exc}")
+                    print(f"post_attempt_end attempt {retry + 1}/2 raised: {exc}")
                 if ok:
                     attempt_ended = True
                     break
-                # Don't sleep on the last try - we're about to exit anyway.
-                if retry < 2:
-                    import time as _time
-                    _time.sleep(0.5 * (retry + 1))
             if not attempt_ended:
                 print(
-                    "WARN: post_attempt_end ultimately FAILED after retries. "
-                    "The attempt will remain IN_PROGRESS on the server until "
-                    "the next start request completes it server-side."
+                    "WARN: post_attempt_end FAILED after 2 attempts. "
+                    "Server-side stale-attempt auto-close will reap "
+                    "the attempt on the next launch."
                 )
         except Exception as exc:
             print("post_attempt_end orchestration failed:", exc)
 
         try:
             if getattr(self, '_batch_poster', None):
-                self._batch_poster.stop()
-                self._batch_poster.wait(2500)
+                # .stop() was already called above (which now wakes
+                # EventBus too), so this just collects the thread.
+                # 1200 ms is plenty for the final flush + thread join.
+                self._batch_poster.wait(1200)
         except Exception:
             pass
+
+        _pump_events()
 
         if hasattr(self, 'custom_page') and hasattr(self.custom_page, 'popup_windows'):
             for popup in list(self.custom_page.popup_windows):
@@ -1665,14 +1766,18 @@ class SecureBrowser(QMainWindow):
         self.kiosk_active = False
         print("Kiosk protection deactivated")
 
+        _pump_events()
+
         if self.network_worker:
             try:
                 self.network_worker.cleanup()
                 self.network_worker.quit()
-                self.network_worker.wait(2000)
+                self.network_worker.wait(1500)
             except Exception as e:
                 print("Error cleaning up network worker:", e)
             self.network_worker = None
+
+        _pump_events()
 
         # Belt-and-braces: even if NetworkWorker.cleanup() raised, force
         # the WFP filters down so the user's internet is restored.

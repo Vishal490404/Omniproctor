@@ -53,6 +53,14 @@ class BatchPoster(QThread):
     # ------------------------------------------------------------------
     def stop(self) -> None:
         self._stop.set()
+        # Wake the bus so the run loop returns immediately instead of
+        # sleeping out the rest of FLUSH_INTERVAL_SEC. Without this,
+        # safe_exit() blocks the UI thread for ~2.5 s on every End
+        # Session even when there's nothing to flush.
+        try:
+            self._bus.wake()
+        except Exception:
+            pass
 
     def run(self) -> None:
         logger.info(

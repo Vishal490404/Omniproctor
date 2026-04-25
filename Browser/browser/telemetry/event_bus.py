@@ -117,6 +117,15 @@ class EventBus:
         """Block until a critical event arrives or ``timeout`` elapses."""
         return self._wake.wait(timeout)
 
+    def wake(self) -> None:
+        """Force any thread blocked in :meth:`wait` to return immediately.
+
+        Used during shutdown so the poster QThread doesn't burn the full
+        ``FLUSH_INTERVAL_SEC`` after ``BatchPoster.stop()`` is called -
+        which made End Session feel laggy by a couple seconds.
+        """
+        self._wake.set()
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._dq)
