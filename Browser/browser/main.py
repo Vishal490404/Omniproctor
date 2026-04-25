@@ -52,10 +52,14 @@ class NetworkWorker(QThread):
             if success:
                 self.finished_success.emit()
             else:
-                self.last_failure = "enter_exam_mode returned False"
+                # Surface the real underlying error from the backend instead of
+                # a generic "returned False" so operators can debug WFP issues.
+                backend = getattr(self.controller, "_backend", None)
+                detail = getattr(backend, "last_error", None) or "enter_exam_mode returned False"
+                self.last_failure = detail
                 self.finished_failure.emit(self.last_failure)
         except Exception as e:
-            self.last_failure = str(e)
+            self.last_failure = f"{type(e).__name__}: {e}"
             self.finished_failure.emit(self.last_failure)
 
     def cleanup(self):

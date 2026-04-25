@@ -139,9 +139,13 @@ IPPROTO_UDP = 17
 RPC_C_AUTHN_WINNT = 10
 
 ERROR_SUCCESS = 0
-FWP_E_FILTER_NOT_FOUND = 0x80320001
+# FWP error codes (FWP_E_BASE = 0x80320000, see fwptypes.h)
+FWP_E_CALLOUT_NOT_FOUND = 0x80320001
+FWP_E_FILTER_NOT_FOUND = 0x80320003
 FWP_E_PROVIDER_NOT_FOUND = 0x80320005
 FWP_E_SUBLAYER_NOT_FOUND = 0x80320007
+FWP_E_NOT_FOUND = 0x80320008
+FWP_E_ALREADY_EXISTS = 0x80320009
 
 
 # ---------------------------------------------------------------------------
@@ -439,9 +443,7 @@ class WfpExamSession:
         provider.displayData.description = "App-level network lockdown for exams"
         provider.flags = 0
         code = FwpmProviderAdd0(self._engine, byref(provider), None)
-        if code == ERROR_SUCCESS:
-            self._provider_added = True
-        elif code in (0x80320009,):  # FWP_E_ALREADY_EXISTS
+        if code in (ERROR_SUCCESS, FWP_E_ALREADY_EXISTS):
             self._provider_added = True
         else:
             _check(code, "FwpmProviderAdd0")
@@ -455,9 +457,7 @@ class WfpExamSession:
         sublayer.providerKey = ctypes.pointer(provider_key)
         sublayer.weight = SUBLAYER_WEIGHT
         code = FwpmSubLayerAdd0(self._engine, byref(sublayer), None)
-        if code == ERROR_SUCCESS:
-            self._sublayer_added = True
-        elif code in (0x80320009,):
+        if code in (ERROR_SUCCESS, FWP_E_ALREADY_EXISTS):
             self._sublayer_added = True
         else:
             _check(code, "FwpmSubLayerAdd0")

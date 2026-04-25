@@ -435,6 +435,7 @@ class WfpNativeFirewallController(FirewallControllerBase):
                 "wfp_native bindings are not available on this platform"
             )
         self._session: "wfp_native.WfpExamSession | None" = None
+        self.last_error: str | None = None
 
     def _build_allow_paths(self) -> list[str]:
         paths: list[str] = []
@@ -469,17 +470,29 @@ class WfpNativeFirewallController(FirewallControllerBase):
         return deduped
 
     def enter_exam_mode(self) -> bool:
+        import traceback as _tb
         if self._state == FirewallState.ACTIVE:
             return True
         logger.info("=== ENTERING EXAM MODE (wfp_native backend) ===")
         self._state = FirewallState.ACTIVATING
+        self.last_error = None
         try:
             allow_paths = self._build_allow_paths()
             logger.info("WFP allow-list: %s", allow_paths)
+            print(f"[wfp_native] Allow list: {allow_paths}")
+            if not allow_paths:
+                raise FirewallConfigurationError(
+                    "No executable paths to whitelist; refusing to lock down network"
+                )
             self._session = wfp_native.WfpExamSession(allow_app_paths=allow_paths)
             self._session.install()
         except Exception as exc:
-            logger.error("wfp_native activation failed: %s", exc)
+            tb = _tb.format_exc()
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            # Surface to the operator console regardless of logging config.
+            print("[wfp_native] activation FAILED:", self.last_error, file=sys.stderr)
+            print(tb, file=sys.stderr)
+            logger.error("wfp_native activation failed: %s\n%s", self.last_error, tb)
             try:
                 if self._session:
                     self._session.uninstall()
