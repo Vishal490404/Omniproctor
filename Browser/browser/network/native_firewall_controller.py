@@ -4,8 +4,17 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from enum import Enum
+
+try:
+    from . import wfp_native
+except ImportError:
+    try:
+        import wfp_native  # type: ignore
+    except ImportError:
+        wfp_native = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +24,7 @@ RULE_DNS_ALLOW = f"{RULE_PREFIX}_AllowDNS"
 FIREWALL_RULE_NAMES = (RULE_BROWSER_ALLOW, RULE_DNS_ALLOW)
 FIREWALL_BACKEND_ENV = "OMNIPROCTOR_FIREWALL_BACKEND"
 ALLOW_NETSH_FALLBACK_ENV = "OMNIPROCTOR_FIREWALL_ALLOW_NETSH_FALLBACK"
+EXTRA_ALLOW_PATHS_ENV = "OMNIPROCTOR_FIREWALL_EXTRA_ALLOW_PATHS"
 
 
 class FirewallState(str, Enum):
@@ -408,34 +418,150 @@ class NetshFirewallController(FirewallControllerBase):
             return False
 
 
+class WfpNativeFirewallController(FirewallControllerBase):
+    """App-level WFP backend that talks to fwpuclnt.dll directly.
+
+    Modeled on ``simplewall``: installs filters in our own provider/sublayer
+    at weight 0xFFFF so they preempt any pre-existing Windows Firewall allow
+    rule in the default sublayer. This is the only backend that actually
+    blocks other apps' traffic when, for example, Microsoft Edge or Defender
+    has already added explicit allow rules for itself.
+    """
+
+    def __init__(self, browser_executable_path: str):
+        super().__init__(browser_executable_path)
+        if wfp_native is None or not wfp_native.is_supported():
+            raise FirewallConfigurationError(
+                "wfp_native bindings are not available on this platform"
+            )
+        self._session: "wfp_native.WfpExamSession | None" = None
+
+    def _build_allow_paths(self) -> list[str]:
+        paths: list[str] = []
+        if self.browser_exe:
+            paths.append(self.browser_exe)
+
+        # When the kiosk runs from source (dev mode) the actual TCP traffic
+        # comes from the python.exe interpreter, not from a packaged .exe.
+        # Add the current interpreter as well so dev sessions stay usable.
+        try:
+            exe = os.path.abspath(sys.executable)
+        except Exception:
+            exe = ""
+        if exe and exe.lower() != os.path.abspath(self.browser_exe).lower():
+            paths.append(exe)
+
+        extras = os.getenv(EXTRA_ALLOW_PATHS_ENV, "")
+        if extras:
+            for raw in extras.split(os.pathsep):
+                raw = raw.strip().strip('"')
+                if raw:
+                    paths.append(raw)
+
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for p in paths:
+            key = os.path.abspath(p).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(p)
+        return deduped
+
+    def enter_exam_mode(self) -> bool:
+        if self._state == FirewallState.ACTIVE:
+            return True
+        logger.info("=== ENTERING EXAM MODE (wfp_native backend) ===")
+        self._state = FirewallState.ACTIVATING
+        try:
+            allow_paths = self._build_allow_paths()
+            logger.info("WFP allow-list: %s", allow_paths)
+            self._session = wfp_native.WfpExamSession(allow_app_paths=allow_paths)
+            self._session.install()
+        except Exception as exc:
+            logger.error("wfp_native activation failed: %s", exc)
+            try:
+                if self._session:
+                    self._session.uninstall()
+            except Exception:
+                pass
+            try:
+                wfp_native.recover_stale()
+            except Exception:
+                pass
+            self._session = None
+            self._state = FirewallState.INACTIVE
+            return False
+        self._state = FirewallState.ACTIVE
+        logger.info("=== EXAM MODE ACTIVE (wfp_native backend) ===")
+        return True
+
+    def exit_exam_mode(self) -> bool:
+        if self._state == FirewallState.INACTIVE:
+            return True
+        logger.info("=== EXITING EXAM MODE (wfp_native backend) ===")
+        self._state = FirewallState.ROLLBACK
+        ok = True
+        try:
+            if self._session:
+                self._session.uninstall()
+        except Exception as exc:
+            logger.error("wfp_native uninstall failed, will recover_stale: %s", exc)
+            ok = False
+        try:
+            wfp_native.recover_stale()
+        except Exception:
+            pass
+        self._session = None
+        self._state = FirewallState.INACTIVE
+        logger.info("=== EXAM MODE EXITED (wfp_native backend) ===")
+        return ok
+
+
 class NativeFirewallController:
-    """Facade that selects WFP backend by default with optional netsh fallback."""
+    """Facade that picks the strongest available backend.
+
+    Backend selection order (override via OMNIPROCTOR_FIREWALL_BACKEND):
+        wfp_native -> wfp -> netsh
+
+    ``wfp_native`` is preferred because it is the only backend that can
+    actually block other applications' traffic when those applications
+    have pre-existing Windows Firewall allow rules.
+    """
 
     def __init__(self, browser_executable_path: str):
         self.browser_exe = browser_executable_path
         self._backend = self._build_backend(browser_executable_path)
 
     def _build_backend(self, browser_executable_path: str) -> FirewallControllerBase:
-        preferred = os.getenv(FIREWALL_BACKEND_ENV, "wfp").strip().lower()
+        preferred = os.getenv(FIREWALL_BACKEND_ENV, "wfp_native").strip().lower()
         allow_netsh_fallback = os.getenv(ALLOW_NETSH_FALLBACK_ENV, "1").strip() not in {"0", "false", "False"}
 
-        if preferred not in {"wfp", "netsh"}:
+        if preferred not in {"wfp_native", "wfp", "netsh"}:
             raise FirewallConfigurationError(
-                f"Unsupported backend '{preferred}'. Use 'wfp' or 'netsh'."
+                f"Unsupported backend '{preferred}'. Use 'wfp_native', 'wfp', or 'netsh'."
             )
 
         if preferred == "netsh":
             logger.info("Using netsh backend (explicit)")
             return NetshFirewallController(browser_executable_path)
 
-        try:
-            logger.info("Using WFP backend (default)")
+        if preferred == "wfp":
+            logger.info("Using NetSecurity WFP backend (explicit)")
             return WfpFirewallController(browser_executable_path)
+
+        try:
+            logger.info("Using wfp_native backend (default, app-level blocking)")
+            return WfpNativeFirewallController(browser_executable_path)
         except Exception as exc:
-            if not allow_netsh_fallback:
-                raise
-            logger.warning("WFP backend unavailable, falling back to netsh: %s", exc)
-            return NetshFirewallController(browser_executable_path)
+            logger.warning("wfp_native backend unavailable, trying NetSecurity WFP: %s", exc)
+            try:
+                return WfpFirewallController(browser_executable_path)
+            except Exception as exc2:
+                if not allow_netsh_fallback:
+                    raise
+                logger.warning("NetSecurity WFP also unavailable, falling back to netsh: %s", exc2)
+                return NetshFirewallController(browser_executable_path)
 
     def enter_exam_mode(self) -> bool:
         return self._backend.enter_exam_mode()
@@ -455,9 +581,20 @@ class NativeFirewallController:
 def emergency_firewall_cleanup() -> None:
     """Best-effort cleanup for crash/atexit paths.
 
-    This cannot restore per-session snapshots, so it falls back to a conservative
-    profile unlock and deletes OmniProctor-managed rules.
+    Wipes any wfp_native filters tagged with our provider GUID and falls back
+    to a conservative profile unlock + NetSecurity-rule cleanup. Safe to call
+    when nothing is installed.
     """
+    if wfp_native is not None:
+        try:
+            removed = wfp_native.recover_stale()
+            if removed:
+                logger.warning(
+                    "Emergency cleanup removed %d orphaned wfp_native filters", removed
+                )
+        except Exception as exc:
+            logger.error("wfp_native recover_stale failed during emergency cleanup: %s", exc)
+
     no_window = _create_no_window_flag()
     for profile in ("domainprofile", "privateprofile", "publicprofile"):
         try:

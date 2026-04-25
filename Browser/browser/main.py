@@ -860,6 +860,20 @@ if __name__ == "__main__":
     if "--unregister-protocol" in sys.argv:
         sys.exit(0 if unregister() else 1)
 
+    if "--firewall-recover" in sys.argv:
+        # Admin-only: wipe any orphaned WFP filters/sublayer/provider that a
+        # crashed previous run may have left behind. Useful when the network
+        # is locked down because exit_exam_mode never ran.
+        if not ensure_run_as_admin():
+            sys.exit(1)
+        try:
+            emergency_firewall_cleanup()
+            print("Firewall recovery completed.")
+            sys.exit(0)
+        except Exception as exc:
+            print(f"Firewall recovery failed: {exc}")
+            sys.exit(1)
+
     no_system_lockdown = NO_SYSTEM_LOCKDOWN_FLAG in sys.argv
 
     if not ensure_run_as_admin():
