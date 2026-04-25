@@ -437,20 +437,80 @@ class WfpNativeFirewallController(FirewallControllerBase):
         self._session: "wfp_native.WfpExamSession | None" = None
         self.last_error: str | None = None
 
+    @staticmethod
+    def _find_qt_webengine_process() -> str | None:
+        """Locate ``QtWebEngineProcess.exe`` (Chromium child process).
+
+        PyQt6's QWebEngineView spawns this binary for every renderer / GPU /
+        utility / network role. WFP's ALE_APP_ID condition matches the *calling*
+        process's exe — not the parent — so unless this path is in our allow
+        list, every TCP connection initiated by the embedded browser is blocked.
+        """
+        candidates: list[str] = []
+
+        try:
+            from PyQt6.QtCore import QLibraryInfo  # type: ignore
+
+            for attr in ("LibraryExecutablesPath", "BinariesPath"):
+                try:
+                    p = QLibraryInfo.path(getattr(QLibraryInfo.LibraryPath, attr))
+                    if p:
+                        candidates.append(p)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        try:
+            base = os.path.dirname(os.path.abspath(sys.executable))
+        except Exception:
+            base = ""
+        if base:
+            candidates.extend(
+                [
+                    base,
+                    os.path.join(base, "PyQt6", "Qt6", "bin"),
+                    os.path.join(base, "_internal", "PyQt6", "Qt6", "bin"),
+                    os.path.join(base, "Lib", "site-packages", "PyQt6", "Qt6", "bin"),
+                ]
+            )
+
+        for d in candidates:
+            for name in ("QtWebEngineProcess.exe", "QtWebEngineProcess"):
+                p = os.path.join(d, name)
+                if os.path.isfile(p):
+                    return p
+        return None
+
     def _build_allow_paths(self) -> list[str]:
         paths: list[str] = []
         if self.browser_exe:
             paths.append(self.browser_exe)
 
-        # When the kiosk runs from source (dev mode) the actual TCP traffic
-        # comes from the python.exe interpreter, not from a packaged .exe.
-        # Add the current interpreter as well so dev sessions stay usable.
+        # When the kiosk runs from source (dev mode) the launcher process is
+        # python.exe / pythonw.exe; the .exe itself only matters for frozen
+        # builds. Including both keeps both modes working.
         try:
             exe = os.path.abspath(sys.executable)
         except Exception:
             exe = ""
         if exe and exe.lower() != os.path.abspath(self.browser_exe).lower():
             paths.append(exe)
+
+        # CRITICAL: QtWebEngineProcess.exe is the Chromium child process that
+        # actually opens TCP/UDP sockets. Without this entry, WFP blocks every
+        # connection initiated by the embedded browser even though the parent
+        # python/exe has a permit rule.
+        qt_we = self._find_qt_webengine_process()
+        if qt_we:
+            logger.info("Discovered QtWebEngineProcess at %s", qt_we)
+            paths.append(qt_we)
+        else:
+            logger.warning(
+                "QtWebEngineProcess.exe not found; the embedded browser will "
+                "have NO network access. Set %s to its absolute path.",
+                EXTRA_ALLOW_PATHS_ENV,
+            )
 
         extras = os.getenv(EXTRA_ALLOW_PATHS_ENV, "")
         if extras:
