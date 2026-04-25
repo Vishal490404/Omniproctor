@@ -56,11 +56,19 @@ class BatchPoster(QThread):
 
     def run(self) -> None:
         logger.info(
-            "BatchPoster started (api_base=%s, attempt_id=%s, active=%s)",
-            self._config.api_base,
-            self._config.attempt_id,
+            "BatchPoster started (active=%s, attempt_id=%s, events_url=%s)",
             self._config.is_active,
+            self._config.attempt_id,
+            self._config.events_url(),
         )
+        if not self._config.is_active:
+            logger.warning(
+                "BatchPoster: telemetry INACTIVE - api_base=%s, has_token=%s, attempt_id=%s. "
+                "No events will be sent. Check the launch URL.",
+                self._config.api_base,
+                bool(self._config.auth_token),
+                self._config.attempt_id,
+            )
 
         while not self._stop.is_set():
             try:
@@ -115,18 +123,23 @@ class BatchPoster(QThread):
                     # base URL (e.g. Vite dev server returning index.html).
                     # Surface it loudly - silent 200s with HTML are the worst
                     # kind of telemetry failure to debug.
-                    print(
-                        f"[telemetry] BatchPoster: non-JSON {resp.status} from {url} "
-                        f"(content-type={ctype!r}) - dropping {len(events)} events. "
-                        f"Is api_base correct? It must point at the FastAPI backend, "
-                        f"NOT the Vite dev server."
+                    logger.error(
+                        "BatchPoster: non-JSON %s from %s (content-type=%r) - "
+                        "dropping %d events. Is api_base correct? It must point "
+                        "at the FastAPI backend, NOT the Vite dev server.",
+                        resp.status, url, ctype, len(events),
                     )
                     return
                 payload = json.loads(raw)
-                print(
-                    f"[telemetry] BatchPoster: POST {url} -> {resp.status} "
-                    f"(accepted={payload.get('accepted')}, "
-                    f"latest_warning_id={payload.get('latest_warning_id')})"
+                logger.info(
+                    "BatchPoster: POST %s -> %s (sent=%d, accepted=%s, "
+                    "rejected=%s, latest_warning_id=%s)",
+                    url,
+                    resp.status,
+                    len(events),
+                    payload.get("accepted"),
+                    payload.get("rejected"),
+                    payload.get("latest_warning_id"),
                 )
         except urllib.error.HTTPError as http_err:
             body_preview = ""
@@ -135,22 +148,22 @@ class BatchPoster(QThread):
             except Exception:
                 pass
             if 400 <= http_err.code < 500:
-                print(
-                    f"[telemetry] BatchPoster: HTTP {http_err.code} from {url} - "
-                    f"dropping {len(events)} events. Body: {body_preview!r}"
+                logger.error(
+                    "BatchPoster: HTTP %d from %s - dropping %d events. Body: %r",
+                    http_err.code, url, len(events), body_preview,
                 )
                 return
-            print(
-                f"[telemetry] BatchPoster: HTTP {http_err.code} from {url} - "
-                f"requeueing {len(events)} events. Body: {body_preview!r}"
+            logger.warning(
+                "BatchPoster: HTTP %d from %s - requeueing %d events. Body: %r",
+                http_err.code, url, len(events), body_preview,
             )
             self._bus.requeue(events)
             self._sleep_backoff()
             return
         except (urllib.error.URLError, TimeoutError) as net_err:
-            print(
-                f"[telemetry] BatchPoster: network error {net_err} for {url} - "
-                f"requeueing {len(events)} events"
+            logger.warning(
+                "BatchPoster: network error %s for %s - requeueing %d events",
+                net_err, url, len(events),
             )
             self._bus.requeue(events)
             self._sleep_backoff()
@@ -183,10 +196,10 @@ def post_attempt_end(reason: str = "user_ended_session", timeout: float = 4.0) -
     cfg = get_config()
     url = cfg.end_attempt_url()
     if not url:
-        print(
-            f"[telemetry] post_attempt_end: skipped - telemetry inactive "
-            f"(api_base={cfg.api_base}, test_id={cfg.test_id}, "
-            f"has_token={bool(cfg.auth_token)})"
+        logger.warning(
+            "post_attempt_end: skipped - telemetry inactive "
+            "(api_base=%s, test_id=%s, has_token=%s)",
+            cfg.api_base, cfg.test_id, bool(cfg.auth_token),
         )
         return False
 
@@ -203,9 +216,9 @@ def post_attempt_end(reason: str = "user_ended_session", timeout: float = 4.0) -
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp.read()
-            print(
-                f"[telemetry] post_attempt_end: POST {url} -> {resp.status} "
-                f"(attempt {cfg.attempt_id} marked completed)"
+            logger.info(
+                "post_attempt_end: POST %s -> %s (attempt %s marked completed)",
+                url, resp.status, cfg.attempt_id,
             )
         return True
     except urllib.error.HTTPError as http_err:
@@ -214,11 +227,11 @@ def post_attempt_end(reason: str = "user_ended_session", timeout: float = 4.0) -
             body_preview = http_err.read().decode("utf-8", errors="replace")[:200]
         except Exception:
             pass
-        print(
-            f"[telemetry] post_attempt_end: HTTP {http_err.code} from {url}. "
-            f"Body: {body_preview!r}"
+        logger.error(
+            "post_attempt_end: HTTP %d from %s. Body: %r",
+            http_err.code, url, body_preview,
         )
         return False
     except Exception as exc:
-        print(f"[telemetry] post_attempt_end: network error for {url}: {exc}")
+        logger.error("post_attempt_end: network error for %s: %s", url, exc)
         return False

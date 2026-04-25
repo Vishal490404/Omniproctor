@@ -1,3 +1,4 @@
+import logging
 import sys
 import os
 import atexit
@@ -5,6 +6,8 @@ import ctypes
 from ctypes import wintypes
 from typing import List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
+
+logger = logging.getLogger(__name__)
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QMessageBox, QVBoxLayout, QWidget,
@@ -1296,8 +1299,17 @@ class SecureBrowser(QMainWindow):
     def _start_telemetry_workers(self) -> None:
         cfg = get_telemetry_config()
         if not cfg.is_active:
-            print("[telemetry] inactive – BatchPoster + WarningPoller not started")
+            logger.warning(
+                "Telemetry inactive - BatchPoster + WarningPoller not started "
+                "(api_base=%s, attempt_id=%s, has_token=%s, test_id=%s)",
+                cfg.api_base, cfg.attempt_id, bool(cfg.auth_token), cfg.test_id,
+            )
             return
+
+        logger.info(
+            "Starting telemetry workers (attempt_id=%s, api_base=%s)",
+            cfg.attempt_id, cfg.api_base,
+        )
 
         try:
             self._batch_poster = BatchPoster(parent=self)
@@ -1305,16 +1317,18 @@ class SecureBrowser(QMainWindow):
                 self._on_latest_warning_id_hint
             )
             self._batch_poster.start()
+            logger.info("BatchPoster QThread launched")
         except Exception as exc:
-            print(f"WARN: BatchPoster start failed: {exc}")
+            logger.exception("BatchPoster start failed: %s", exc)
             self._batch_poster = None
 
         try:
             self._warning_poller = WarningPoller(parent=self)
             self._warning_poller.warning_received.connect(self._on_warning_received)
             self._warning_poller.start()
+            logger.info("WarningPoller QThread launched")
         except Exception as exc:
-            print(f"WARN: WarningPoller start failed: {exc}")
+            logger.exception("WarningPoller start failed: %s", exc)
             self._warning_poller = None
 
     def _on_latest_warning_id_hint(self, warning_id: int) -> None:
@@ -1679,12 +1693,18 @@ def resolve_target_url(argv):
                     test_id=int(test_id_raw) if test_id_raw else None,
                 )
                 cfg = get_telemetry_config()
-                print(
-                    f"[telemetry] configured (active={cfg.is_active}, "
-                    f"attempt_id={cfg.attempt_id}, api_base={cfg.api_base})"
+                logger.info(
+                    "Telemetry configured (active=%s, attempt_id=%s, "
+                    "test_id=%s, student_id=%s, api_base=%s, has_token=%s)",
+                    cfg.is_active,
+                    cfg.attempt_id,
+                    cfg.test_id,
+                    cfg.student_id,
+                    cfg.api_base,
+                    bool(cfg.auth_token),
                 )
             except Exception as exc:
-                print(f"WARN: telemetry configuration failed: {exc}")
+                logger.exception("Telemetry configuration failed: %s", exc)
 
         if encoded_target:
             decoded_target = unquote(encoded_target).strip()

@@ -12,11 +12,14 @@ flushes the queue immediately instead of waiting for the next 5s tick.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 # Hard cap on buffered events. With the default 5s flush + 200/batch
 # server cap, a healthy connection drains comfortably under this.
@@ -72,7 +75,17 @@ class EventBus:
                 # we want to know if that happened so the poster can log it.
                 if len(self._dq) == self._dq.maxlen:
                     self._dropped_count += 1
+                    if self._dropped_count == 1 or self._dropped_count % 100 == 0:
+                        logger.warning(
+                            "EventBus full (max=%d) - dropped %d events so far. "
+                            "Backend likely unreachable.",
+                            self._dq.maxlen, self._dropped_count,
+                        )
                 self._dq.append(ev)
+            logger.debug(
+                "EventBus.emit %s (severity=%s, depth=%d)",
+                event_type, ev.severity, len(self._dq),
+            )
             # Wake the poster if it's blocked on the empty queue.
             if severity == "critical":
                 self._wake.set()
