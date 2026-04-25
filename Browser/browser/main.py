@@ -1478,23 +1478,52 @@ class SecureBrowser(QMainWindow):
         except Exception:
             pass
 
+        # IMPORTANT: post_attempt_end MUST be called BEFORE the BatchPoster
+        # is torn down. Two reasons:
+        #   1. The network stack and event loop are still healthy at this
+        #      point - we have the full timeout budget to retry transient
+        #      failures. If we wait until after the WFP cleanup runs, we
+        #      may have already restored the firewall and severed the
+        #      kiosk's outbound HTTPS path.
+        #   2. If this call fails the attempt stays IN_PROGRESS forever,
+        #      which then causes start_attempt() on the next launch to
+        #      reuse the SAME attempt_id (existing-attempt branch) and
+        #      replay every old warning. Retrying here is the cheapest
+        #      way to avoid that whole class of bug.
+        try:
+            from telemetry import post_attempt_end
+            attempt_ended = False
+            for retry in range(3):
+                ok = False
+                try:
+                    ok = post_attempt_end(
+                        reason="user_ended_session",
+                        timeout=6.0,
+                    )
+                except Exception as exc:
+                    print(f"post_attempt_end attempt {retry + 1}/3 raised: {exc}")
+                if ok:
+                    attempt_ended = True
+                    break
+                # Don't sleep on the last try - we're about to exit anyway.
+                if retry < 2:
+                    import time as _time
+                    _time.sleep(0.5 * (retry + 1))
+            if not attempt_ended:
+                print(
+                    "WARN: post_attempt_end ultimately FAILED after retries. "
+                    "The attempt will remain IN_PROGRESS on the server until "
+                    "the next start request completes it server-side."
+                )
+        except Exception as exc:
+            print("post_attempt_end orchestration failed:", exc)
+
         try:
             if getattr(self, '_batch_poster', None):
                 self._batch_poster.stop()
                 self._batch_poster.wait(2500)
         except Exception:
             pass
-
-        # Tell the WebClient the attempt is over so the row flips from
-        # IN_PROGRESS to COMPLETED. Strictly best-effort: we only run it
-        # when telemetry was configured (i.e. launched from the dashboard
-        # with api_base + token + test_id), and we never let a network
-        # error block shutdown.
-        try:
-            from telemetry import post_attempt_end
-            post_attempt_end(reason="user_ended_session")
-        except Exception as exc:
-            print("post_attempt_end failed:", exc)
 
         if hasattr(self, 'custom_page') and hasattr(self.custom_page, 'popup_windows'):
             for popup in list(self.custom_page.popup_windows):

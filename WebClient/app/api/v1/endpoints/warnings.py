@@ -65,6 +65,15 @@ def list_warnings(
     db: DBSession,
     current_user: CurrentUser,
     since_id: int = Query(0, ge=0, description="Return only warnings with id > since_id"),
+    include_acknowledged: bool | None = Query(
+        None,
+        description=(
+            "If False, omit warnings the candidate already acked. "
+            "Defaults to False for student callers (so a stale kiosk relaunch "
+            "doesn't replay old warnings) and True for staff (so the dashboard "
+            "still shows a full audit trail)."
+        ),
+    ),
 ):
     """Both the candidate (kiosk short-poll) and staff can read this list.
 
@@ -73,7 +82,8 @@ def list_warnings(
     """
     attempt = get_attempt_or_404(db, attempt_id)
 
-    if current_user.role == UserRole.STUDENT:
+    is_student_call = current_user.role == UserRole.STUDENT
+    if is_student_call:
         if attempt.student_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -84,6 +94,9 @@ def list_warnings(
         if current_user.role in {UserRole.ADMIN, UserRole.TEACHER}:
             ensure_manage_permission(test, current_user)
 
+    if include_acknowledged is None:
+        include_acknowledged = not is_student_call
+
     rows = (
         db.query(ProctorWarning)
         .options(joinedload(ProctorWarning.sender))
@@ -91,6 +104,8 @@ def list_warnings(
     )
     if since_id:
         rows = rows.filter(ProctorWarning.id > since_id)
+    if not include_acknowledged:
+        rows = rows.filter(ProctorWarning.acknowledged_at.is_(None))
     rows = rows.order_by(ProctorWarning.id.asc()).all()
     return [_serialize(w) for w in rows]
 

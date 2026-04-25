@@ -87,6 +87,53 @@ def _band_for(score: int) -> str:
     return "ok"
 
 
+def _contextual_weight(ev: BehaviorEvent, base_weight: int) -> int:
+    """Adjust the static weight using event-specific payload signals.
+
+    Examples:
+      * MONITOR_COUNT_CHANGE 2 -> 1 means the candidate fixed the
+        violation - that's the *opposite* of suspicious, so it should
+        not raise the score.
+      * CLIPBOARD_COPY of a tiny selection (length < 20) is much less
+        interesting than a multi-paragraph copy.
+    """
+    payload = ev.payload if isinstance(ev.payload, dict) else None
+    etype = ev.event_type
+
+    if etype == BehaviorEventType.MONITOR_COUNT_CHANGE:
+        if not payload:
+            return base_weight
+        try:
+            cur = int(payload.get("count", 1))
+        except (TypeError, ValueError):
+            cur = 1
+        try:
+            prev = int(payload.get("previous_count", cur))
+        except (TypeError, ValueError):
+            prev = cur
+        if cur <= 1 and prev <= 1:
+            # Baseline / informational, not a violation.
+            return 0
+        if cur <= 1 < prev:
+            # They reverted to a single display - a tiny acknowledgement
+            # weight is enough; the original 1 -> 2 transition already
+            # contributed the full risk.
+            return 2
+        return base_weight
+
+    if etype == BehaviorEventType.CLIPBOARD_COPY and payload:
+        try:
+            length = int(payload.get("length", 0))
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 20:
+            return max(base_weight - 2, 1)
+        if length >= 500:
+            return base_weight + 4
+
+    return base_weight
+
+
 def score_from_events(events: Iterable[BehaviorEvent]) -> RiskBreakdown:
     """Pure function so the unit tests don't need a DB."""
     totals: dict[str, int] = {}
@@ -95,12 +142,17 @@ def score_from_events(events: Iterable[BehaviorEvent]) -> RiskBreakdown:
 
     for ev in events:
         count += 1
-        weight = EVENT_WEIGHTS.get(ev.event_type, 1)
+        base = EVENT_WEIGHTS.get(ev.event_type, 1)
+        weight = _contextual_weight(ev, base)
+
         if (ev.severity or "").lower() == "critical":
             weight = max(weight, 25)
             has_critical = True
         elif (ev.severity or "").lower() == "warn":
             weight = max(weight, 5)
+
+        if weight <= 0:
+            continue
 
         key = ev.event_type.value if hasattr(ev.event_type, "value") else str(ev.event_type)
         totals[key] = totals.get(key, 0) + weight

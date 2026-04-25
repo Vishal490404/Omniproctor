@@ -62,6 +62,21 @@ def get_attempt_summary_map(db: Session, test: Test, student_ids: list[int]) -> 
     }
 
 
+# How long an IN_PROGRESS attempt can sit with no activity before we
+# treat it as orphaned (kiosk crashed / network died on End Session) and
+# auto-close it. Anything shorter than this and a true mid-test reload
+# would lose the candidate's session.
+STALE_ATTEMPT_SECONDS = 120
+
+
+def _close_stale_attempt(db: Session, attempt: TestAttempt, *, reason: str) -> None:
+    attempt.status = AttemptStatus.ENDED
+    attempt.ended_at = datetime.now(timezone.utc)
+    attempt.ended_reason = reason
+    db.add(attempt)
+    db.commit()
+
+
 def start_attempt(db: Session, test: Test, student: User) -> TestAttempt:
     assignment = (
         db.query(TestAssignment)
@@ -86,7 +101,48 @@ def start_attempt(db: Session, test: Test, student: User) -> TestAttempt:
         .first()
     )
     if existing:
-        return existing
+        # Decide whether the existing attempt is a genuine mid-test reload
+        # (return it so the candidate doesn't lose state + spend an extra
+        # attempt) or an orphan from a prior session whose End Session POST
+        # never reached us (auto-close + create a fresh one so we don't
+        # replay old warnings into the new session).
+        last_activity = existing.started_at
+        from app.models.behavior_event import BehaviorEvent
+        latest_event_time = (
+            db.query(func.max(BehaviorEvent.event_time))
+            .filter(BehaviorEvent.attempt_id == existing.id)
+            .scalar()
+        )
+        if latest_event_time and (
+            last_activity is None or latest_event_time > last_activity
+        ):
+            last_activity = latest_event_time
+
+        if last_activity is None:
+            return existing
+
+        now = datetime.now(timezone.utc)
+        # Some DBs hand back naive datetimes; normalise to UTC so the
+        # subtraction below doesn't raise.
+        if last_activity.tzinfo is None:
+            last_activity = last_activity.replace(tzinfo=timezone.utc)
+        idle_seconds = (now - last_activity).total_seconds()
+        if idle_seconds < STALE_ATTEMPT_SECONDS:
+            return existing
+
+        # Orphaned attempt - close it server-side and fall through to
+        # create a fresh one.
+        _close_stale_attempt(
+            db,
+            existing,
+            reason=f"auto_closed_stale_after_{int(idle_seconds)}s",
+        )
+        # Re-check the attempt limit now that we've consumed one. We use
+        # the freshly committed state so the count includes the just-
+        # closed orphan.
+        summary = get_attempt_summary(db, test, student.id)
+        if not summary.can_attempt:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Attempt limit reached")
 
     attempt = TestAttempt(
         test_id=test.id,
