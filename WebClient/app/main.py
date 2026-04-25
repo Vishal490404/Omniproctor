@@ -102,8 +102,10 @@ def ensure_schema_compatibility() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    ensure_schema_compatibility()
+    # Create base schema first so ensure_schema_compatibility's ALTER TABLE
+    # statements have something to alter on a fresh database.
     Base.metadata.create_all(bind=engine)
+    ensure_schema_compatibility()
 
 
 @app.get("/health")
