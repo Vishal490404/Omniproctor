@@ -945,7 +945,18 @@ class SecureBrowser(QMainWindow):
         try:
             self._clipboard = QGuiApplication.clipboard()
             if self._clipboard is not None:
-                self._last_clipboard_signature = ""
+                # Seed with the current clipboard signature so any content
+                # the user already had copied BEFORE launching the kiosk
+                # is not falsely logged as a brand-new CLIPBOARD_COPY event
+                # the first time dataChanged fires.
+                try:
+                    seed_mime = self._clipboard.mimeData()
+                    seed_text = seed_mime.text() if (seed_mime and seed_mime.hasText()) else ""
+                    self._last_clipboard_signature = (
+                        f"{len(seed_text)}:{hash(seed_text) & 0xFFFFFFFF}"
+                    )
+                except Exception:
+                    self._last_clipboard_signature = ""
                 self._clipboard.dataChanged.connect(self._on_clipboard_changed)
         except Exception as exc:
             print(f"WARN: clipboard monitor not installed: {exc}")
@@ -1162,10 +1173,15 @@ class SecureBrowser(QMainWindow):
         count = len(screens)
         self.top_bar.set_monitor_status(count)
 
-        # Emit a MONITOR_COUNT_CHANGE event only when the count changes,
-        # not every poll, so we don't flood the bus.
+        # Emit a MONITOR_COUNT_CHANGE event only when the count *actually*
+        # changes from a known baseline. The first poll just records the
+        # baseline silently - otherwise a normal single-monitor session
+        # would generate a bogus "change" event on startup.
         last_count = getattr(self, "_last_monitor_count", None)
-        if last_count != count:
+        if last_count is None:
+            self._last_monitor_count = count
+        elif last_count != count:
+            prev = last_count
             self._last_monitor_count = count
             try:
                 screen_meta = []
@@ -1183,7 +1199,11 @@ class SecureBrowser(QMainWindow):
                         continue
                 get_event_bus().emit(
                     "MONITOR_COUNT_CHANGE",
-                    payload={"count": count, "screens": screen_meta},
+                    payload={
+                        "previous_count": prev,
+                        "count": count,
+                        "screens": screen_meta,
+                    },
                     severity="warn" if count > 1 else "info",
                 )
             except Exception:
