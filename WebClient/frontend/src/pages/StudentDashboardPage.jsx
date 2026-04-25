@@ -1,7 +1,7 @@
 import { Alert, Badge, Button, Card, Group, SimpleGrid, Stack, Text, Title } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { IconDownload } from '@tabler/icons-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { attemptsApi, dashboardApi } from '../api/services'
@@ -11,7 +11,6 @@ import { formatDateIST } from '../utils/time'
 export function StudentDashboardPage() {
   const [tests, setTests] = useState([])
   const [showInstallBanner, setShowInstallBanner] = useState(false)
-  const probeAttemptedRef = useRef(false)
 
   async function loadMyTests() {
     try {
@@ -24,52 +23,6 @@ export function StudentDashboardPage() {
 
   useEffect(() => {
     loadMyTests()
-  }, [])
-
-  // Best-effort detection: launch a hidden iframe with the kiosk protocol; if
-  // the page never loses focus within 1.5 s, the protocol handler is almost
-  // certainly not registered -> show the install banner.
-  useEffect(() => {
-    if (probeAttemptedRef.current) return
-    probeAttemptedRef.current = true
-    let timer = null
-    let focusLostAt = null
-    const handleBlur = () => {
-      focusLostAt = Date.now()
-    }
-    const handleFocus = () => {
-      // If the OS handed focus to the kiosk handler, we're done.
-      if (focusLostAt) {
-        clearTimeout(timer)
-        setShowInstallBanner(false)
-      }
-    }
-    window.addEventListener('blur', handleBlur)
-    window.addEventListener('focus', handleFocus)
-    let iframe = null
-    try {
-      iframe = document.createElement('iframe')
-      iframe.style.display = 'none'
-      iframe.src = 'omniproctor-browser://ping'
-      document.body.appendChild(iframe)
-    } catch {
-      setShowInstallBanner(true)
-    }
-    timer = setTimeout(() => {
-      if (!focusLostAt && document.hasFocus()) {
-        setShowInstallBanner(true)
-      }
-      try {
-        if (iframe?.parentNode) iframe.parentNode.removeChild(iframe)
-      } catch {
-        // ignore
-      }
-    }, 1500)
-    return () => {
-      clearTimeout(timer)
-      window.removeEventListener('blur', handleBlur)
-      window.removeEventListener('focus', handleFocus)
-    }
   }, [])
 
   const launchKiosk = async (item) => {
@@ -85,7 +38,20 @@ export function StudentDashboardPage() {
         notifications.show({ color: 'red', title: 'Invalid test link', message: 'This test link is not valid.' })
         return
       }
+
+      // Detect missing protocol handler: if focus never leaves this tab
+      // within ~1.5 s of the navigation, the kiosk almost certainly isn't
+      // installed - show the install banner instead of a silent no-op.
+      let focusLost = false
+      const onBlur = () => { focusLost = true }
+      window.addEventListener('blur', onBlur, { once: true })
       window.location.href = launchUrl
+      window.setTimeout(() => {
+        window.removeEventListener('blur', onBlur)
+        if (!focusLost && document.hasFocus()) {
+          setShowInstallBanner(true)
+        }
+      }, 1500)
     } catch (error) {
       notifications.show({ color: 'red', title: 'Unable to start attempt', message: error?.response?.data?.detail || 'Try again' })
     }
