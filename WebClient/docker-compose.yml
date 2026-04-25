@@ -40,6 +40,10 @@ services:
     # (and breaking on Windows because the host .venv contains macOS symlinks).
     volumes:
       - ./app:/app/app
+      # Drop OmniProctorKioskSetup-<version>.exe into ./installers/ on the
+      # host (renamed to OmniProctorKioskSetup.exe) and it will be served by
+      # GET /api/v1/downloads/installer/windows. See WebClient/installers/README.md.
+      - ./installers:/var/lib/omniproctor/installers:ro
 
 volumes:
   webclient_pgdata:

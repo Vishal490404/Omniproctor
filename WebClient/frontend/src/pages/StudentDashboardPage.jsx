@@ -1,6 +1,8 @@
-import { Badge, Button, Card, Group, SimpleGrid, Stack, Text, Title } from '@mantine/core'
+import { Alert, Badge, Button, Card, Group, SimpleGrid, Stack, Text, Title } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
-import { useEffect, useState } from 'react'
+import { IconDownload } from '@tabler/icons-react'
+import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { attemptsApi, dashboardApi } from '../api/services'
 import { buildKioskLaunchUrl } from '../utils/browserLaunch'
@@ -8,6 +10,8 @@ import { formatDateIST } from '../utils/time'
 
 export function StudentDashboardPage() {
   const [tests, setTests] = useState([])
+  const [showInstallBanner, setShowInstallBanner] = useState(false)
+  const probeAttemptedRef = useRef(false)
 
   async function loadMyTests() {
     try {
@@ -20,6 +24,52 @@ export function StudentDashboardPage() {
 
   useEffect(() => {
     loadMyTests()
+  }, [])
+
+  // Best-effort detection: launch a hidden iframe with the kiosk protocol; if
+  // the page never loses focus within 1.5 s, the protocol handler is almost
+  // certainly not registered -> show the install banner.
+  useEffect(() => {
+    if (probeAttemptedRef.current) return
+    probeAttemptedRef.current = true
+    let timer = null
+    let focusLostAt = null
+    const handleBlur = () => {
+      focusLostAt = Date.now()
+    }
+    const handleFocus = () => {
+      // If the OS handed focus to the kiosk handler, we're done.
+      if (focusLostAt) {
+        clearTimeout(timer)
+        setShowInstallBanner(false)
+      }
+    }
+    window.addEventListener('blur', handleBlur)
+    window.addEventListener('focus', handleFocus)
+    let iframe = null
+    try {
+      iframe = document.createElement('iframe')
+      iframe.style.display = 'none'
+      iframe.src = 'omniproctor-browser://ping'
+      document.body.appendChild(iframe)
+    } catch {
+      setShowInstallBanner(true)
+    }
+    timer = setTimeout(() => {
+      if (!focusLostAt && document.hasFocus()) {
+        setShowInstallBanner(true)
+      }
+      try {
+        if (iframe?.parentNode) iframe.parentNode.removeChild(iframe)
+      } catch {
+        // ignore
+      }
+    }, 1500)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('blur', handleBlur)
+      window.removeEventListener('focus', handleFocus)
+    }
   }, [])
 
   const launchKiosk = async (item) => {
@@ -50,6 +100,29 @@ export function StudentDashboardPage() {
         </Stack>
         <Badge color="teal" size="lg" variant="light">{tests.length} assigned</Badge>
       </Group>
+
+      {showInstallBanner && (
+        <Alert
+          color="orange"
+          icon={<IconDownload size={16} />}
+          title="Kiosk browser not detected"
+          withCloseButton
+          onClose={() => setShowInstallBanner(false)}
+        >
+          <Text size="sm" mb="xs">
+            We couldn&apos;t find the OmniProctor secure kiosk browser on this
+            device. Install it once to take exams.
+          </Text>
+          <Button
+            component={Link}
+            to="/student/downloads"
+            size="xs"
+            leftSection={<IconDownload size={14} />}
+          >
+            Download kiosk browser
+          </Button>
+        </Alert>
+      )}
 
       {tests.length === 0 && (
         <Card className="surface-card" radius="lg" p="xl">

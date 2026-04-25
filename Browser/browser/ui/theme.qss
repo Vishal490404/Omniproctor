@@ -1,0 +1,123 @@
+/* OmniProctor kiosk theme.
+ * @primary, @danger, @success, @surface, @text tokens are substituted
+ * at load time by browser/ui/theme.py. Do not use real CSS variables —
+ * Qt's QSS engine doesn't understand them.
+ */
+
+QWidget {
+    background-color: @surface;
+    color: @text;
+    font-family: "Segoe UI", "Inter", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow, QDialog {
+    background-color: @surface;
+}
+
+QLabel {
+    background: transparent;
+    color: @text;
+}
+
+QLabel#kioskBrand {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding-left: 4px;
+}
+
+QLabel#kioskTitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: @text;
+}
+
+QLabel#kioskSubtitle {
+    font-size: 11px;
+    font-weight: 500;
+    color: @textmuted;
+}
+
+QLabel#kioskTimer {
+    font-size: 18px;
+    font-weight: 700;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    color: @text;
+    padding: 4px 14px;
+    border-radius: 8px;
+    background-color: @surface2;
+}
+
+/* ---- Status pills ---------------------------------------------------- */
+QLabel.statusPill {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background-color: @surface2;
+    color: @textmuted;
+    margin: 0 3px;
+}
+
+QLabel.statusPill[status="ok"] {
+    background-color: rgba(22, 163, 74, 0.18);
+    color: @success;
+}
+
+QLabel.statusPill[status="warn"] {
+    background-color: rgba(217, 119, 6, 0.20);
+    color: @warning;
+}
+
+QLabel.statusPill[status="bad"] {
+    background-color: rgba(220, 38, 38, 0.20);
+    color: @danger;
+}
+
+/* ---- Top bar container --------------------------------------------- */
+QWidget#kioskTopBar {
+    background-color: @surface2;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+/* ---- Buttons -------------------------------------------------------- */
+QPushButton {
+    background-color: @primary;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton:hover { background-color: @primarydark; }
+QPushButton:pressed { background-color: @primarydark; }
+QPushButton:disabled { background-color: @surface2; color: @textmuted; }
+
+QPushButton#dangerButton {
+    background-color: @danger;
+    color: white;
+    min-width: 110px;
+}
+QPushButton#dangerButton:hover { background-color: @dangerdark; }
+QPushButton#dangerButton:pressed { background-color: @dangerdark; }
+
+QPushButton#ghostButton {
+    background-color: transparent;
+    color: @text;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+}
+QPushButton#ghostButton:hover { background-color: @surface2; }
+
+/* ---- Message box ---------------------------------------------------- */
+QMessageBox {
+    background-color: @surface2;
+}
+QMessageBox QLabel {
+    color: @text;
+    font-size: 13px;
+}
+QMessageBox QPushButton {
+    min-width: 96px;
+}

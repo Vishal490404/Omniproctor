@@ -2,16 +2,15 @@ import sys
 import os
 import atexit
 import ctypes
-from typing import List
+from typing import List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
-    QHBoxLayout, QMessageBox
+    QApplication, QMainWindow, QMessageBox, QVBoxLayout, QWidget,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import (
-    QWebEnginePage, QWebEngineSettings, QWebEngineScript
+    QWebEnginePage, QWebEngineScript
 )
 from PyQt6.QtCore import QUrl, QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
@@ -26,10 +25,15 @@ from log_setup import configure_file_logging
 from network.native_firewall_controller import NativeFirewallController, emergency_firewall_cleanup
 from protocol_handler import ensure_registered, register, unregister
 
+from web_profile import build_kiosk_profile
+from win11_compat import harden_kiosk_window, remove_capture_protection
+from ui import KioskSplash, KioskTopBar, OmniProctorMessageBox, apply_theme
+
 NO_SYSTEM_LOCKDOWN_FLAG = "--no-system-lockdown"
 
-WDA_EXCLUDEFROMCAPTURE = 0x00000011
-WDA_NONE = 0x00000000
+
+def _is_dev_mode() -> bool:
+    return os.getenv("OMNIPROCTOR_DEV", "").strip() in {"1", "true", "True"}
 
 
 # -------------------------
@@ -53,8 +57,6 @@ class NetworkWorker(QThread):
             if success:
                 self.finished_success.emit()
             else:
-                # Surface the real underlying error from the backend instead of
-                # a generic "returned False" so operators can debug WFP issues.
                 backend = getattr(self.controller, "_backend", None)
                 detail = getattr(backend, "last_error", None) or "enter_exam_mode returned False"
                 self.last_failure = detail
@@ -64,7 +66,6 @@ class NetworkWorker(QThread):
             self.finished_failure.emit(self.last_failure)
 
     def cleanup(self):
-        """Restore firewall state."""
         try:
             if self.controller:
                 self.controller.exit_exam_mode()
@@ -176,9 +177,11 @@ class SecureBrowser(QMainWindow):
         url: str,
         browser_exe_path: str | None = None,
         system_lockdown: bool = True,
+        splash: Optional[KioskSplash] = None,
     ):
         super().__init__()
-        self.setWindowTitle("Secure Kiosk Browser")
+        self.setWindowTitle("OmniProctor Secure Kiosk")
+        self.setWindowIcon(KioskTopBar.make_window_icon())
 
         self.kiosk_active = False
         self.network_worker: NetworkWorker | None = None
@@ -189,69 +192,51 @@ class SecureBrowser(QMainWindow):
         self._target_url_loaded = False
         self._shutdown_started = False
         self.system_lockdown = system_lockdown
+        self._splash = splash
+        self._granted_permission_origins = set()
 
-        # UI setup
+        # ---- UI setup -----------------------------------------------------
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout(main_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Control panel
-        control_panel = QWidget()
-        control_panel.setFixedHeight(45)
-        control_panel.setStyleSheet("background-color: #1a202c; border-bottom: 1px solid #2d3748;")
-        control_layout = QHBoxLayout(control_panel)
+        self.top_bar = KioskTopBar(
+            test_title="OmniProctor Secure Session",
+            assignee=os.environ.get("USERNAME", "Candidate"),
+            parent=main_widget,
+        )
+        self.top_bar.exit_requested.connect(self.confirm_exit)
 
-        self.exit_button = QPushButton("End Session")
-        self.exit_button.setFixedSize(110, 32)
-        self.exit_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e53e3e;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                font-weight: 500;
-                font-size: 12px;
-                padding: 8px 16px;
-            }
-            QPushButton:hover {
-                background-color: #c53030;
-            }
-            QPushButton:pressed {
-                background-color: #9c2626;
-            }
-        """)
-        self.exit_button.clicked.connect(self.confirm_exit)
-        control_layout.addStretch()
-        control_layout.addWidget(self.exit_button)
-        control_layout.setContentsMargins(10, 5, 10, 5)
+        # ---- Persistent Web Engine profile (perf-profile) -----------------
+        self.profile = build_kiosk_profile(parent=self)
 
-        # Browser / profile setup
+        # ---- Browser view --------------------------------------------------
         self.browser = QWebEngineView()
-        default_page = self.browser.page()
-        self.profile = default_page.profile() if default_page else None
-
-        if self.profile:
-            self.configure_browser_settings()
-        else:
-            print("Warning: No profile available for browser configuration")
-
         self.custom_page = CustomWebEnginePage(self.profile, self.browser)
         self.custom_page.featurePermissionRequested.connect(self.handle_permission_request)
         self.custom_page.fullScreenRequested.connect(self.handle_fullscreen_request)
 
         self.browser.setPage(self.custom_page)
-
         self.browser.setUrl(QUrl("about:blank"))
 
-        layout.addWidget(control_panel)
+        # Inject screen-info script via this profile's script collection.
+        self.inject_screen_info_script()
+
+        layout.addWidget(self.top_bar)
         layout.addWidget(self.browser)
 
         self.setWindowFullScreen()
 
         QTimer.singleShot(0, self.start_protections_parallel)
-        QTimer.singleShot(300, self.check_monitors)
+
+        # Strict single-monitor enforcement (monitor-enforce)
+        QTimer.singleShot(300, self.enforce_single_monitor)
+        self._monitor_poll = QTimer(self)
+        self._monitor_poll.setInterval(5000)
+        self._monitor_poll.timeout.connect(self.enforce_single_monitor)
+        self._monitor_poll.start()
 
         self.setup_security_monitoring()
 
@@ -259,53 +244,16 @@ class SecureBrowser(QMainWindow):
             app = QGuiApplication.instance()
             if app:
                 if hasattr(app, 'screenAdded'):
-                    getattr(app, 'screenAdded').connect(lambda s: self.inject_screen_info_script())
+                    getattr(app, 'screenAdded').connect(lambda _s: self.enforce_single_monitor())
                 if hasattr(app, 'screenRemoved'):
-                    getattr(app, 'screenRemoved').connect(lambda s: self.inject_screen_info_script())
+                    getattr(app, 'screenRemoved').connect(lambda _s: self.enforce_single_monitor())
                 print("Screen change monitoring enabled")
         except (AttributeError, TypeError):
             print("Screen change monitoring not available - using static detection")
 
     # -------------------------
-    # Browser settings & injection
+    # Screen-info JS injection
     # -------------------------
-    def configure_browser_settings(self):
-        try:
-            if not self.profile:
-                print("Warning: No profile available for configuration")
-                return
-            settings = self.profile.settings()
-            if not settings:
-                print("Warning: No settings available for configuration")
-                return
-
-            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.ScreenCaptureEnabled, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.WebRTCPublicInterfacesOnly, False)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
-            settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
-
-            try:
-                settings.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
-                settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, True)
-                settings.setAttribute(QWebEngineSettings.WebAttribute.TouchIconsEnabled, True)
-                settings.setAttribute(QWebEngineSettings.WebAttribute.FocusOnNavigationEnabled, True)
-            except AttributeError:
-                pass
-            try:
-                settings.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
-                settings.setAttribute(QWebEngineSettings.WebAttribute.AutoLoadImages, True)
-            except AttributeError:
-                pass
-
-            self.inject_screen_info_script()
-            print("Browser settings configured for exam mode")
-        except Exception as e:
-            print(f"Warning: Could not configure some browser settings: {e}")
-
     def inject_screen_info_script(self):
         if not self.profile:
             return
@@ -314,12 +262,17 @@ class SecureBrowser(QMainWindow):
             if not script_collection:
                 print("Warning: No script collection available")
                 return
+
+            # Remove any previous version of our injected script.
             try:
-                existing = []
-            except AttributeError:
+                existing = list(script_collection.find("qt_injected_screens"))
+            except (AttributeError, TypeError):
                 existing = []
             for s in existing:
-                script_collection.remove(s)
+                try:
+                    script_collection.remove(s)
+                except Exception:
+                    pass
 
             screens = QGuiApplication.screens()
             js_screens = []
@@ -356,7 +309,7 @@ class SecureBrowser(QMainWindow):
                             width: screen.width,
                             label: screen.name || `Screen ${{index + 1}}`,
                             devicePixelRatio: window.devicePixelRatio || 1
-                        }})));
+                        }}));
 
                         return Promise.resolve({{
                             screens: screens,
@@ -408,6 +361,9 @@ class SecureBrowser(QMainWindow):
         except Exception as e:
             print(f"Could not inject screen info script: {e}")
 
+    # -------------------------
+    # Page-load lifecycle
+    # -------------------------
     def load_target_url(self):
         if self._target_url_loaded:
             return
@@ -416,6 +372,13 @@ class SecureBrowser(QMainWindow):
             return
         print("All protections ready, loading exam URL...")
         self._target_url_loaded = True
+
+        if self._splash:
+            try:
+                self._splash.close()
+            except Exception:
+                pass
+            self._splash = None
 
         def on_load_finished(success):
             try:
@@ -476,7 +439,6 @@ class SecureBrowser(QMainWindow):
 
             if (!navigator.getScreenDetails) {
                 navigator.getScreenDetails = function() {
-                    console.log('getScreenDetails called - providing Qt screen data');
                     if (window.__qt_injected_screens && window.__qt_injected_screens.length > 0) {
                         const screens = window.__qt_injected_screens.map((screen, index) => ({
                             availHeight: screen.height,
@@ -496,35 +458,9 @@ class SecureBrowser(QMainWindow):
                             label: screen.name || `Display ${index + 1}`,
                             devicePixelRatio: window.devicePixelRatio || 1
                         }));
-
-                        return Promise.resolve({
-                            screens: screens,
-                            currentScreen: screens[0] || null
-                        });
-                    } else {
-                        const fallbackScreen = {
-                            availHeight: window.screen.availHeight,
-                            availLeft: window.screen.availLeft || 0,
-                            availTop: window.screen.availTop || 0,
-                            availWidth: window.screen.availWidth,
-                            colorDepth: window.screen.colorDepth || 24,
-                            height: window.screen.height,
-                            isExtended: false,
-                            isInternal: true,
-                            isPrimary: true,
-                            left: window.screen.left || 0,
-                            orientation: window.screen.orientation || { angle: 0, type: 'landscape-primary' },
-                            pixelDepth: window.screen.pixelDepth || 24,
-                            top: window.screen.top || 0,
-                            width: window.screen.width,
-                            label: 'Primary Display',
-                            devicePixelRatio: window.devicePixelRatio || 1
-                        };
-                        return Promise.resolve({
-                            screens: [fallbackScreen],
-                            currentScreen: fallbackScreen
-                        });
+                        return Promise.resolve({ screens: screens, currentScreen: screens[0] || null });
                     }
+                    return Promise.resolve({ screens: [], currentScreen: null });
                 };
             }
 
@@ -532,23 +468,11 @@ class SecureBrowser(QMainWindow):
                 const originalQuery = navigator.permissions.query;
                 navigator.permissions.query = function(descriptor) {
                     if (descriptor && descriptor.name === 'window-management') {
-                        console.log('Window management permission requested - granting');
                         return Promise.resolve({ state: 'granted' });
                     }
                     return originalQuery.call(this, descriptor);
                 };
             }
-
-            window.addEventListener('blur', function() {
-                console.log('Window lost focus - exam security event');
-            });
-            window.addEventListener('focus', function() {
-                console.log('Window gained focus - exam security event');
-            });
-
-            const screenCount = (window.__qt_injected_screens && window.__qt_injected_screens.length) || 1;
-            console.log(`Screen detection ready: ${screenCount} screen(s) detected`);
-
         })();
         """
         self.custom_page.runJavaScript(monitor_script, lambda r: print("Monitoring scripts injected successfully"))
@@ -564,23 +488,30 @@ class SecureBrowser(QMainWindow):
             QWebEnginePage.Feature.DesktopVideoCapture: "Screen Sharing",
             QWebEnginePage.Feature.DesktopAudioVideoCapture: "Screen and Audio Sharing",
             QWebEnginePage.Feature.Geolocation: "Location",
-            QWebEnginePage.Feature.Notifications: "Notifications"
+            QWebEnginePage.Feature.Notifications: "Notifications",
         }
-
         feature_name = feature_names.get(feature, f"Unknown Feature ({feature})")
         print(f"Permission requested: {feature_name} from {origin.toString()}")
 
         self.custom_page.setFeaturePermission(
             origin,
             feature,
-            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
+            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
         )
+        self._granted_permission_origins.add((origin.toString(), int(feature)))
         print(f"{feature_name} permission granted automatically")
+
+        if feature in (
+            QWebEnginePage.Feature.MediaVideoCapture,
+            QWebEnginePage.Feature.MediaAudioVideoCapture,
+        ):
+            self.top_bar.set_camera_status("ok", "Camera ON")
+        elif feature == QWebEnginePage.Feature.MediaAudioCapture:
+            self.top_bar.set_camera_status("ok", "Microphone ON")
 
     def handle_fullscreen_request(self, request):
         print(f"Fullscreen request from: {request.origin().toString()}")
         request.accept()
-        print("Fullscreen request granted")
         if not self.isFullScreen():
             self.showFullScreen()
 
@@ -617,29 +548,63 @@ class SecureBrowser(QMainWindow):
                     self.custom_page.popup_windows.remove(popup)
 
     # -------------------------
-    # Monitor check
+    # Strict single-monitor enforcement
     # -------------------------
-    def check_monitors(self):
+    def enforce_single_monitor(self):
+        if self._shutdown_started:
+            return
         try:
             screens = QGuiApplication.screens()
-            print(f"Detected {len(screens)} monitor(s)")
-            if len(screens) > 1:
-                QMessageBox.warning(
-                    self,
-                    "Multiple Monitors Detected",
-                    f"Multiple monitors detected ({len(screens)} total)!\nFor exam security, please use only one monitor."
-                )
-                print(f"Multiple monitor check completed: {len(screens)} monitors found")
-            else:
-                print("Single monitor detected - exam security OK")
-        except Exception as e:
-            print(f"Error checking monitors: {e}")
+        except Exception as exc:
+            print(f"Error reading screen list: {exc}")
+            return
+        count = len(screens)
+        self.top_bar.set_monitor_status(count)
+        if count <= 1:
+            return
+
+        # If we've already warned once, just keep counting and wait for the
+        # grace period to expire.
+        if not getattr(self, "_monitor_grace_running", False):
+            self._monitor_grace_running = True
+            print(f"Multiple monitors detected ({count}) - showing blocking modal")
+            QTimer.singleShot(0, lambda: self._show_monitor_violation_dialog(count))
+            QTimer.singleShot(10_000, self._monitor_grace_expired)
+
+    def _show_monitor_violation_dialog(self, count: int):
+        try:
+            OmniProctorMessageBox.critical(
+                self,
+                "External Display Detected",
+                (
+                    f"{count} displays are connected to this device.\n\n"
+                    "Disconnect all external monitors within 10 seconds or the "
+                    "secure session will be terminated."
+                ),
+            )
+        except Exception as exc:
+            print(f"Could not show monitor violation dialog: {exc}")
+
+    def _monitor_grace_expired(self):
+        if self._shutdown_started:
+            return
+        screens = QGuiApplication.screens()
+        if len(screens) <= 1:
+            print("External display(s) disconnected within grace period - continuing session")
+            self._monitor_grace_running = False
+            return
+        print("Grace period expired with multiple monitors still connected - terminating session")
+        self.safe_exit()
 
     # -------------------------
     # Kiosk / network protection (async)
     # -------------------------
     def start_protections_parallel(self):
+        if self._splash:
+            self._splash.set_status("Activating kiosk hooks…")
         self.start_kiosk_protection_async()
+        if self._splash:
+            self._splash.set_status("Enabling secure network filter…")
         self.start_network_protection_async()
 
     def start_kiosk_protection_async(self):
@@ -649,6 +614,7 @@ class SecureBrowser(QMainWindow):
             hwnd = int(self.winId())
             print(f"Window handle: {hwnd}")
             set_target_browser_window(hwnd)
+            harden_kiosk_window(hwnd)  # WDA_EXCLUDEFROMCAPTURE + DWM hardening
             self.kiosk_worker = KioskWorker(
                 hwnd, system_lockdown=self.system_lockdown
             )
@@ -678,10 +644,16 @@ class SecureBrowser(QMainWindow):
     def _on_network_ready(self):
         print("Network protection active (Native Firewall)")
         self.network_protection_ready = True
+        self.top_bar.set_network_status(True, "Network OK")
+        self.top_bar.set_firewall_status(True, "Firewall ON")
+        if self._splash:
+            self._splash.set_status("Loading exam…")
         self.load_target_url()
 
     def _on_network_failed(self, reason: str):
         print("Failed to activate network protection:", reason)
+        self.top_bar.set_network_status(False, "Network blocked")
+        self.top_bar.set_firewall_status(False, "Firewall failed")
         self._show_network_failure_dialog(reason)
 
     def _show_network_failure_dialog(self, reason: str):
@@ -692,7 +664,7 @@ class SecureBrowser(QMainWindow):
             _log_hint = f"\n\nFull log: {get_log_path()}"
         except Exception:
             _log_hint = ""
-        QMessageBox.critical(
+        OmniProctorMessageBox.critical(
             self,
             "Network Protection Failed",
             "Secure traffic blocking could not be activated.\n\n"
@@ -705,35 +677,33 @@ class SecureBrowser(QMainWindow):
     # Teardown / exit
     # -------------------------
     def confirm_exit(self):
-        reply = QMessageBox.question(
+        reply = OmniProctorMessageBox.question(
             self,
-            'Exit Secure Session',
-            'Are you sure you want to quit the secure exam session?\n\nThis will end your current session and may affect your exam progress.',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            "Exit Secure Session",
+            "Are you sure you want to quit the secure exam session?\n\n"
+            "This will end your current session and may affect your exam progress.",
+            buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            default_button=QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.safe_exit()
 
     def safe_exit(self):
-        """Single source of truth for all cleanup.
-        Called by confirm_exit, atexit handler, and closeEvent.
-        """
         if self._shutdown_started:
             return
         self._shutdown_started = True
         print("Exiting secure browser – restoring system state...")
 
-        # Stop timers
         try:
             if hasattr(self, 'fullscreen_timer') and self.fullscreen_timer:
                 self.fullscreen_timer.stop()
             if hasattr(self, 'popup_cleanup_timer') and self.popup_cleanup_timer:
                 self.popup_cleanup_timer.stop()
+            if hasattr(self, '_monitor_poll') and self._monitor_poll:
+                self._monitor_poll.stop()
         except Exception:
             pass
 
-        # Close popups
         if hasattr(self, 'custom_page') and hasattr(self.custom_page, 'popup_windows'):
             for popup in list(self.custom_page.popup_windows):
                 try:
@@ -742,7 +712,11 @@ class SecureBrowser(QMainWindow):
                 except Exception:
                     pass
 
-        # Stop kiosk protection (keyboard hooks + gestures + task manager)
+        try:
+            remove_capture_protection(int(self.winId()))
+        except Exception:
+            pass
+
         if self.kiosk_active:
             try:
                 stop_exam_kiosk_mode()
@@ -751,7 +725,6 @@ class SecureBrowser(QMainWindow):
             self.kiosk_active = False
             print("Kiosk protection deactivated")
 
-        # Restore firewall
         if self.network_worker:
             try:
                 self.network_worker.cleanup()
@@ -768,7 +741,6 @@ class SecureBrowser(QMainWindow):
             os._exit(0)
 
     def closeEvent(self, event):
-        """Intercept window close to guarantee cleanup."""
         self.safe_exit()
         event.accept()
 
@@ -864,10 +836,56 @@ def resolve_target_url(argv):
     return None
 
 
+def _build_chromium_flags() -> list[str]:
+    """Curated Chromium flag set for fast, secure media-capable kiosk."""
+    flags = [
+        '--enable-features=WindowManagement,WebRTC-Hardware-H264-Encoding,WebRTC-Hardware-H264-Decoding,CanvasOopRasterization,UseSkiaRenderer',
+        '--enable-experimental-web-platform-features',
+        '--enable-blink-features=WindowManagement,GetDisplayMedia,ScreenWakeLock',
+        # Performance --------------------------------------------------------
+        '--enable-gpu-rasterization',
+        '--enable-zero-copy',
+        '--num-raster-threads=4',
+        '--enable-accelerated-2d-canvas',
+        # Media auto-grant (we also auto-accept in Python). Note: dropped
+        # --use-fake-ui-for-media-stream so the real device picker logic runs.
+        '--auto-accept-camera-and-microphone-capture',
+        '--enable-media-stream',
+        # Misc ---------------------------------------------------------------
+        '--allow-file-access-from-files',
+        '--disable-gpu-sandbox',
+        '--permissions-policy=window-management=*,screen-wake-lock=*,display-capture=*',
+    ]
+    if _is_dev_mode():
+        # Dev-only relaxations
+        flags.extend([
+            '--disable-web-security',
+            '--ignore-certificate-errors',
+            '--allow-running-insecure-content',
+        ])
+    return flags
+
+
+def _apply_hidpi_policy():
+    """Keep fractional scaling sharp on Win11 instead of forcing 2x rounding."""
+    try:
+        from PyQt6.QtGui import QGuiApplication as _QGuiApp
+        _QGuiApp.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except (AttributeError, TypeError) as exc:
+        print(f"HiDPI policy not applied: {exc}")
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+    except (AttributeError, TypeError):
+        pass
+    try:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+    except (AttributeError, TypeError):
+        pass
+
+
 if __name__ == "__main__":
-    # Configure logging before anything else so stdout-less launches
-    # (pythonw.exe / protocol handler / frozen exe) still produce a
-    # diagnosable log file on disk.
     try:
         _log_path = configure_file_logging()
         print(f"[omniproctor] Log file: {_log_path}")
@@ -880,9 +898,6 @@ if __name__ == "__main__":
         sys.exit(0 if unregister() else 1)
 
     if "--firewall-recover" in sys.argv:
-        # Admin-only: wipe any orphaned WFP filters/sublayer/provider that a
-        # crashed previous run may have left behind. Useful when the network
-        # is locked down because exit_exam_mode never ran.
         if not ensure_run_as_admin():
             sys.exit(1)
         try:
@@ -903,36 +918,38 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"Protocol self-registration skipped: {exc}")
 
-    # Install emergency cleanup early (must run on the main thread) so
-    # SIGINT / SIGTERM / SIGBREAK and atexit reliably restore Task Manager
-    # and gestures even on hard exits.
     try:
         install_keyblock_emergency_handlers()
     except Exception as exc:
         print(f"Could not install keyblock emergency handlers: {exc}")
 
-    enhanced_args = sys.argv + [
-        '--enable-features=WindowManagement,WebRTC-Hardware-H264-Encoding,WebRTC-Hardware-H264-Decoding',
-        '--enable-experimental-web-platform-features',
-        '--enable-blink-features=WindowManagement,GetDisplayMedia,ScreenWakeLock',
-        '--disable-web-security',
-        '--allow-running-insecure-content',
-        '--disable-features=VizDisplayCompositor',
-        '--ignore-certificate-errors',
-        '--disable-gpu-sandbox',
-        '--allow-file-access-from-files',
-        '--enable-media-stream',
-        '--use-fake-ui-for-media-stream',
-        '--auto-accept-camera-and-microphone-capture',
-        '--permissions-policy=window-management=*,screen-wake-lock=*,display-capture=*'
-    ]
+    # HiDPI must be set before QApplication is constructed.
+    _apply_hidpi_policy()
 
+    enhanced_args = sys.argv + _build_chromium_flags()
     app = QApplication(enhanced_args)
     app.setQuitOnLastWindowClosed(True)
+    app.setApplicationName("OmniProctor Kiosk")
+    app.setOrganizationName("OmniProctor")
+    app.setWindowIcon(KioskTopBar.make_window_icon())
+    apply_theme(app)
+
+    # Splash while WFP and kiosk hooks come up.
+    splash: Optional[KioskSplash] = None
+    try:
+        splash = KioskSplash()
+        splash.set_status("Starting OmniProctor secure browser…")
+        splash.show()
+        app.processEvents()
+    except Exception as exc:
+        print(f"Splash unavailable: {exc}")
+        splash = None
 
     target_url = resolve_target_url(sys.argv)
     if not target_url:
-        QMessageBox.critical(
+        if splash:
+            splash.close()
+        OmniProctorMessageBox.critical(
             None,
             "Launch Failed",
             "No valid launch URL was provided.\n\n"
@@ -940,14 +957,13 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # Dynamic: the exe path for the firewall allow-rule.
-    # When bundled as a .exe via PyInstaller, sys.executable IS the .exe.
     browser_exe_path = sys.executable
 
     window = SecureBrowser(
         target_url,
         browser_exe_path=browser_exe_path,
         system_lockdown=not no_system_lockdown,
+        splash=splash,
     )
     if no_system_lockdown:
         print(
@@ -956,6 +972,11 @@ if __name__ == "__main__":
         )
     _active_browser_instance = window
     window.show()
+    if splash:
+        try:
+            splash.finish(window)
+        except Exception:
+            pass
 
     exit_code = app.exec()
     sys.exit(exit_code)

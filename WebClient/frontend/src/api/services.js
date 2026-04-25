@@ -38,3 +38,34 @@ export const usersApi = {
 export const dashboardApi = {
   myTests: () => apiClient.get('/dashboard/me/tests'),
 }
+
+export const downloadsApi = {
+  getManifest: () => apiClient.get('/downloads/manifest'),
+  // Streams the installer as a Blob. The Bearer token is attached by the
+  // axios request interceptor in client.js so we don't have to set it here.
+  downloadInstaller: (platform = 'windows', onProgress) =>
+    apiClient.get(`/downloads/installer/${platform}`, {
+      responseType: 'blob',
+      onDownloadProgress: onProgress,
+    }),
+}
+
+/** Trigger a browser save-as dialog for an axios blob response. */
+export function saveBlobResponse(response, fallbackFilename = 'download.bin') {
+  const disposition = response?.headers?.['content-disposition'] || ''
+  let filename = fallbackFilename
+  const match = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disposition)
+  if (match) {
+    filename = decodeURIComponent(match[1] || match[2] || fallbackFilename).trim()
+  }
+  const blob = new Blob([response.data], { type: 'application/octet-stream' })
+  const url = window.URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  // Defer revoke so Safari/Edge actually finish the download.
+  setTimeout(() => window.URL.revokeObjectURL(url), 1500)
+}

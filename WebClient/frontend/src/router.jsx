@@ -4,6 +4,7 @@ import { AppShellLayout } from './components/AppShellLayout'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { useAuth } from './context/AuthContext'
 import { BehaviorLogsPage } from './pages/BehaviorLogsPage'
+import { DownloadsPage } from './pages/DownloadsPage'
 import { ForbiddenPage } from './pages/ForbiddenPage'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
@@ -35,6 +36,7 @@ export function AppRouter() {
                 <Route path="tests" element={<TestsPage />} />
                 <Route path="students" element={<StudentsPage />} />
                 <Route path="logs" element={<BehaviorLogsPage />} />
+                <Route path="downloads" element={<DownloadsPage />} />
                 <Route path="*" element={<Navigate to="tests" replace />} />
               </Routes>
             </AppShellLayout>
@@ -44,10 +46,14 @@ export function AppRouter() {
 
       <Route element={<ProtectedRoute allowedRoles={['student']} />}>
         <Route
-          path="/student"
+          path="/student/*"
           element={
             <AppShellLayout>
-              <StudentDashboardPage />
+              <Routes>
+                <Route index element={<StudentDashboardPage />} />
+                <Route path="downloads" element={<DownloadsPage />} />
+                <Route path="*" element={<Navigate to="" replace />} />
+              </Routes>
             </AppShellLayout>
           }
         />

@@ -14,6 +14,11 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = ["*"]
 
+    # Kiosk-browser installer distribution -------------------------------
+    installer_dir: str = "/var/lib/omniproctor/installers"
+    installer_windows_filename: str = "OmniProctorKioskSetup.exe"
+    installer_windows_version: str = "0.1.0"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 

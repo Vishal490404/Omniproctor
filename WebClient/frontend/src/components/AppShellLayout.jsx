@@ -3,6 +3,7 @@ import {
   IconChevronRight,
   IconDashboard,
   IconDeviceDesktopAnalytics,
+  IconDownload,
   IconFileDescription,
   IconLogout,
   IconMoon,
@@ -26,11 +27,15 @@ export function AppShellLayout({ children }) {
   const { colorScheme, toggleColorScheme } = useColorSchemePreference()
 
   const links = user?.role === 'student'
-    ? [{ to: '/student', label: 'My Dashboard', icon: IconDashboard }]
+    ? [
+        { to: '/student', label: 'My Dashboard', icon: IconDashboard, exact: true },
+        { to: '/student/downloads', label: 'Downloads', icon: IconDownload },
+      ]
     : [
         { to: '/portal/tests', label: 'Tests', icon: IconFileDescription },
         { to: '/portal/students', label: 'Students', icon: IconUsers },
         { to: '/portal/logs', label: 'Behavior Logs', icon: IconDeviceDesktopAnalytics },
+        { to: '/portal/downloads', label: 'Downloads', icon: IconDownload },
       ]
 
   return (
@@ -77,18 +82,24 @@ export function AppShellLayout({ children }) {
 
       <AppShell.Navbar p="md" className="app-navbar">
         <Stack>
-          {links.map((link) => (
-            <NavLink
-              key={link.to}
-              className="shell-nav-link"
-              label={link.label}
-              leftSection={<link.icon size={16} />}
-              active={location.pathname.startsWith(link.to)}
-              onClick={() => navigate(link.to)}
-              variant="filled"
-              radius="md"
-            />
-          ))}
+          {links.map((link) => {
+            const path = location.pathname.replace(/\/+$/, '') || '/'
+            const isActive = link.exact
+              ? path === link.to.replace(/\/+$/, '')
+              : path.startsWith(link.to)
+            return (
+              <NavLink
+                key={link.to}
+                className="shell-nav-link"
+                label={link.label}
+                leftSection={<link.icon size={16} />}
+                active={isActive}
+                onClick={() => navigate(link.to)}
+                variant="filled"
+                radius="md"
+              />
+            )
+          })}
           <Button variant="subtle" color="red" leftSection={<IconLogout size={16} />} onClick={() => { logout(); navigate('/login') }}>
             Sign out
           </Button>
