@@ -106,6 +106,15 @@ class CustomWebEnginePage(QWebEnginePage):
         self.popup_windows: List[QWebEngineView] = []
         self.parent_browser = parent
 
+    def javaScriptConsoleMessage(self, level, message, line, source_id):
+        """Forward page console logs into our Python log so we can see them
+        without devtools (kiosk has devtools disabled)."""
+        try:
+            level_name = {0: "INFO", 1: "WARN", 2: "ERROR"}.get(int(level), "LOG")
+            print(f"[page-console:{level_name}] {message} ({source_id}:{line})")
+        except Exception:
+            pass
+
     def createWindow(self, type):
         try:
             popup_view = QWebEngineView()
@@ -320,7 +329,7 @@ class SecureBrowser(QMainWindow):
                         availWidth: screen.width,
                         colorDepth: 24,
                         height: screen.height,
-                        isExtended: index > 0,
+                        isExtended: false,
                         isInternal: index === 0,
                         isPrimary: index === 0,
                         left: screen.left,
@@ -344,33 +353,43 @@ class SecureBrowser(QMainWindow):
                     }});
                 }}
 
-                // ALWAYS replace getScreenDetails: in modern Chromium this
-                // method exists natively but rejects unless the embedder
-                // grants the window-management permission. Our shim feeds
-                // the page real screen geometry from Qt without needing the
-                // browser-level prompt.
-                const __qt_origGetScreenDetails = navigator.getScreenDetails ?
-                    navigator.getScreenDetails.bind(navigator) : null;
-                navigator.getScreenDetails = function() {{
-                    if (__qt_origGetScreenDetails) {{
-                        return __qt_origGetScreenDetails().catch(function() {{
-                            return __qt_buildScreenDetailsResult();
-                        }});
-                    }}
+                // The Window Management API spec puts getScreenDetails on
+                // Window, NOT on Navigator. Many sites call it as
+                // ``window.getScreenDetails()`` or just ``getScreenDetails()``.
+                // We previously only patched ``navigator.getScreenDetails``,
+                // which is a non-standard alias — so HackerRank never saw
+                // our shim and went down the rejected-permission path.
+                function __qt_screenDetailsShim() {{
+                    console.log('[OmniProctor] getScreenDetails() called -> serving '
+                        + window.__qt_injected_screens.length + ' screen(s) from Qt');
                     return Promise.resolve(__qt_buildScreenDetailsResult());
-                }};
+                }}
+
+                try {{ window.getScreenDetails = __qt_screenDetailsShim; }} catch (e) {{}}
+                try {{ navigator.getScreenDetails = __qt_screenDetailsShim; }} catch (e) {{}}
                 if (window.Window && window.Window.prototype) {{
                     try {{
-                        window.Window.prototype.getScreenDetails = navigator.getScreenDetails;
+                        Object.defineProperty(window.Window.prototype, 'getScreenDetails', {{
+                            value: __qt_screenDetailsShim,
+                            writable: true,
+                            configurable: true
+                        }});
                     }} catch (e) {{}}
                 }}
 
                 if (window.screen) {{
-                    Object.defineProperty(window.screen, 'isExtended', {{
-                        value: window.__qt_injected_screens.length > 1,
-                        writable: false,
-                        enumerable: true
-                    }});
+                    // Always report isExtended=false: even if multiple
+                    // monitors are physically attached, the kiosk's strict
+                    // single-monitor enforcement will tear down the session,
+                    // so for the page's pre-flight we can safely tell it
+                    // there is one screen.
+                    try {{
+                        Object.defineProperty(window.screen, 'isExtended', {{
+                            value: false,
+                            configurable: true,
+                            enumerable: true
+                        }});
+                    }} catch (e) {{}}
                 }}
 
                 Object.defineProperty(navigator, 'qtScreenCount', {{
@@ -380,7 +399,6 @@ class SecureBrowser(QMainWindow):
                 }});
 
                 if (navigator.permissions && navigator.permissions.query) {{
-                    const originalQuery = navigator.permissions.query;
                     const FORCE_GRANTED = new Set([
                         'window-management',
                         'window-placement',  // legacy alias used by older sites
@@ -389,26 +407,48 @@ class SecureBrowser(QMainWindow):
                         'clipboard-read',
                         'clipboard-write',
                         'notifications',
-                        'fullscreen'
+                        'fullscreen',
+                        'display-capture',
+                        'screen-wake-lock'
                     ]);
-                    navigator.permissions.query = function(descriptor) {{
+                    function __qt_makeStatus(name) {{
+                        return {{
+                            state: 'granted',
+                            status: 'granted',
+                            name: name,
+                            onchange: null,
+                            addEventListener: function() {{}},
+                            removeEventListener: function() {{}},
+                            dispatchEvent: function() {{ return true; }}
+                        }};
+                    }}
+                    const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+                    function __qt_permissionsQuery(descriptor) {{
                         if (descriptor && FORCE_GRANTED.has(descriptor.name)) {{
-                            // Return a minimal but spec-shaped PermissionStatus.
-                            const status = {{
-                                state: 'granted',
-                                name: descriptor.name,
-                                onchange: null,
-                                addEventListener: function() {{}},
-                                removeEventListener: function() {{}},
-                                dispatchEvent: function() {{ return true; }}
-                            }};
-                            return Promise.resolve(status);
+                            console.log('[OmniProctor] permissions.query(' + descriptor.name + ') -> granted (shim)');
+                            return Promise.resolve(__qt_makeStatus(descriptor.name));
                         }}
-                        return originalQuery.call(this, descriptor);
-                    }};
+                        return originalQuery(descriptor);
+                    }}
+                    // Patch both the instance and (defensively) the prototype
+                    // so callers that grab Permissions.prototype.query still
+                    // hit our shim.
+                    try {{ navigator.permissions.query = __qt_permissionsQuery; }} catch (e) {{}}
+                    try {{
+                        if (window.Permissions && window.Permissions.prototype) {{
+                            Object.defineProperty(window.Permissions.prototype, 'query', {{
+                                value: __qt_permissionsQuery,
+                                writable: true,
+                                configurable: true
+                            }});
+                        }}
+                    }} catch (e) {{}}
                 }}
 
-                console.log('Qt Screen Info Injected: ' + window.__qt_injected_screens.length + ' screens detected');
+                window.__qt_kiosk_shim_loaded = true;
+                console.log('[OmniProctor] kiosk shim loaded; screens=' + window.__qt_injected_screens.length
+                    + ', getScreenDetails=' + typeof window.getScreenDetails
+                    + ', perms.query.patched=' + (navigator.permissions && navigator.permissions.query.toString().includes('FORCE_GRANTED')));
             }})();
             """
 
