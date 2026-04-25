@@ -90,9 +90,8 @@ python main.py
 ```
 Omniproctor/
 ├── Browser/                 # Secure browser application
-│   ├── main.py             # Main launcher with authentication
 │   ├── browser/            # Core browser implementation
-│   │   ├── main.py         # Browser engine with security features
+│   │   ├── main.py         # Browser engine with security features (entry point)
 │   │   ├── keyblocks.py    # Keyboard/hotkey blocking
 │   │   └── network/        # Network control modules
 │   └── pyproject.toml      # Python dependencies

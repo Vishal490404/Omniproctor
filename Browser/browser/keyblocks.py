@@ -9,6 +9,7 @@ class KioskModeKeyBlocker:
         self.browser_window = None
         self.running = False
         self.active_hotkeys = []
+        self._gestures_suppressed = False
 
     def setup_keyboard_hooks(self):
         if not self.blocked:
@@ -198,6 +199,88 @@ class KioskModeKeyBlocker:
             print(f"Could not re-enable Task Manager: {e}")
             return False
 
+    # ------------------------------------------------------------------
+    # Gesture & trackpad suppression via winreg
+    # ------------------------------------------------------------------
+    def suppress_gestures(self) -> bool:
+        """Disable Windows 10/11 edge swipes and Task View button via registry."""
+        try:
+            self._set_edge_swipe_policy(disabled=True)
+            self._set_task_view_button(disabled=True)
+            self._gestures_suppressed = True
+            print("Gestures and trackpad swipes suppressed via registry")
+            return True
+        except Exception as e:
+            print(f"Error suppressing gestures: {e}")
+            return False
+
+    def restore_gestures(self) -> bool:
+        """Re-enable edge swipes and Task View button."""
+        try:
+            self._set_edge_swipe_policy(disabled=False)
+            self._set_task_view_button(disabled=False)
+            self._gestures_suppressed = False
+            print("Gestures and trackpad swipes restored via registry")
+            return True
+        except Exception as e:
+            print(f"Error restoring gestures: {e}")
+            return False
+
+    @staticmethod
+    def _set_edge_swipe_policy(disabled: bool) -> None:
+        """Control edge swipe gestures (Action Center / Notifications).
+        Sets HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\EdgeUI
+              AllowEdgeSwipe = 0 (disable) or deletes it (enable).
+        """
+        key_path = r"SOFTWARE\Policies\Microsoft\Windows\EdgeUI"
+        try:
+            if disabled:
+                key = winreg.CreateKeyEx(
+                    winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                    winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY)
+                winreg.SetValueEx(key, "AllowEdgeSwipe", 0, winreg.REG_DWORD, 0)
+                winreg.CloseKey(key)
+                print("  Edge swipe gestures disabled")
+            else:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                    winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY)
+                try:
+                    winreg.DeleteValue(key, "AllowEdgeSwipe")
+                except FileNotFoundError:
+                    pass
+                winreg.CloseKey(key)
+                print("  Edge swipe gestures re-enabled")
+        except PermissionError:
+            print("  Edge swipe policy: permission denied (needs admin)")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"  Edge swipe policy error: {e}")
+
+    @staticmethod
+    def _set_task_view_button(disabled: bool) -> None:
+        """Control Task View button (Win+Tab trigger area on taskbar).
+        Sets HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced
+              ShowTaskViewButton = 0 (hide) or 1 (show).
+        """
+        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        try:
+            key = winreg.CreateKeyEx(
+                winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY)
+            value = 0 if disabled else 1
+            winreg.SetValueEx(key, "ShowTaskViewButton", 0, winreg.REG_DWORD, value)
+            winreg.CloseKey(key)
+            state = "hidden" if disabled else "visible"
+            print(f"  Task View button set to {state}")
+        except PermissionError:
+            print("  Task View button: permission denied (needs admin)")
+        except Exception as e:
+            print(f"  Task View button error: {e}")
+
+    # ------------------------------------------------------------------
+
     def start_kiosk_mode(self, target_window_hwnd=None):
         if self.blocked:
             return False
@@ -211,6 +294,7 @@ class KioskModeKeyBlocker:
 
         self.running = True
         self.disable_task_manager()
+        self.suppress_gestures()
 
         self.browser_window = target_window_hwnd
 
@@ -225,8 +309,8 @@ class KioskModeKeyBlocker:
         self.blocked = False
 
         self.stop_keyboard_listener()
-
         self.enable_task_manager()
+        self.restore_gestures()
 
         print("Kiosk mode deactivated - Normal operation restored")
         return True
@@ -234,7 +318,7 @@ class KioskModeKeyBlocker:
     def is_admin(self):
         try:
             return ctypes.windll.shell32.IsUserAnAdmin()
-        except:
+        except Exception:
             return False
 
 

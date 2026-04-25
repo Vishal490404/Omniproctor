@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: omniproctor-webclient-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: omniproctor
+      POSTGRES_USER: omniproctor
+      POSTGRES_PASSWORD: omniproctor
+    ports:
+      - "5434:5432"
+    volumes:
+      - webclient_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omniproctor -d omniproctor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  webclient-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omniproctor-webclient-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://omniproctor:omniproctor@db:5432/omniproctor
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./:/app
+
+volumes:
+  webclient_pgdata:

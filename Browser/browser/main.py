@@ -1,7 +1,9 @@
 import sys
 import os
+import atexit
 import ctypes
 from typing import List
+from urllib.parse import parse_qs, unquote, urlparse
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
@@ -15,9 +17,9 @@ from PyQt6.QtCore import QUrl, QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 
 from keyblocks import start_exam_kiosk_mode, stop_exam_kiosk_mode, set_target_browser_window
-from network.simplewall_controller import SimpleWallController
+from network.native_firewall_controller import NativeFirewallController, emergency_firewall_cleanup
+from protocol_handler import ensure_registered, register, unregister
 
-# Constants for display affinity (unused but kept for completeness)
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 WDA_NONE = 0x00000000
 
@@ -26,29 +28,31 @@ WDA_NONE = 0x00000000
 # Background Workers
 # -------------------------
 class NetworkWorker(QThread):
-    """Run SimpleWall.enter_exam_mode in a background thread."""
+    """Run NativeFirewallController.enter_exam_mode in a background thread."""
     finished_success = pyqtSignal()
     finished_failure = pyqtSignal(str)
 
-    def __init__(self, python_exe_path: str, parent=None):
+    def __init__(self, browser_exe_path: str, parent=None):
         super().__init__(parent)
-        self.python_exe_path = python_exe_path
-        self.controller = None
+        self.browser_exe_path = browser_exe_path
+        self.controller: NativeFirewallController | None = None
+        self.last_failure: str | None = None
 
     def run(self):
         try:
-            # instantiate controller and call enter_exam_mode (blocking)
-            self.controller = SimpleWallController(self.python_exe_path)
+            self.controller = NativeFirewallController(self.browser_exe_path)
             success = self.controller.enter_exam_mode()
             if success:
                 self.finished_success.emit()
             else:
-                self.finished_failure.emit("enter_exam_mode returned False")
+                self.last_failure = "enter_exam_mode returned False"
+                self.finished_failure.emit(self.last_failure)
         except Exception as e:
-            self.finished_failure.emit(str(e))
+            self.last_failure = str(e)
+            self.finished_failure.emit(self.last_failure)
 
     def cleanup(self):
-        """Stop network protection if started."""
+        """Restore firewall state."""
         try:
             if self.controller:
                 self.controller.exit_exam_mode()
@@ -87,7 +91,6 @@ class CustomWebEnginePage(QWebEnginePage):
         self.parent_browser = parent
 
     def createWindow(self, type):
-        """Always create a real popup view + page and keep strong refs."""
         try:
             popup_view = QWebEngineView()
             popup_page = CustomWebEnginePage(self.profile(), popup_view)
@@ -97,10 +100,8 @@ class CustomWebEnginePage(QWebEnginePage):
             popup_view.resize(800, 600)
             popup_view.setWindowTitle("OmniProctor - Secure Browser")
 
-            # Keep reference so GC doesn't remove it
             self.popup_windows.append(popup_view)
 
-            # Hook lifecycle and content events
             popup_page.windowCloseRequested.connect(lambda pv=popup_view: self._close_popup(pv))
 
             def on_url_changed(url):
@@ -116,10 +117,8 @@ class CustomWebEnginePage(QWebEnginePage):
                     QTimer.singleShot(300, lambda pv=popup_view: self._close_popup_if_blank(pv))
             popup_page.loadFinished.connect(on_load_finished)
 
-            # Show popup (change to hide() if you want headless popups)
             popup_view.show()
 
-            # Final fallback auto-close after 3s
             QTimer.singleShot(3000, lambda pv=popup_view: self._close_popup_if_blank(pv))
 
             return popup_page
@@ -157,17 +156,18 @@ class CustomWebEnginePage(QWebEnginePage):
 # Main Secure Browser Window
 # -------------------------
 class SecureBrowser(QMainWindow):
-    def __init__(self, url: str, python_exe_for_simplewall: str | None = None):
+    def __init__(self, url: str, browser_exe_path: str | None = None):
         super().__init__()
         self.setWindowTitle("Secure Kiosk Browser")
 
-        # State
         self.kiosk_active = False
-        self.simplewall_worker: NetworkWorker | None = None
+        self.network_worker: NetworkWorker | None = None
         self.kiosk_worker: KioskWorker | None = None
-        self.simplewall_python_exe = python_exe_for_simplewall or sys.executable
+        self.browser_exe_path = browser_exe_path or sys.executable
         self.target_url = url
         self.network_protection_ready = False
+        self._target_url_loaded = False
+        self._shutdown_started = False
 
         # UI setup
         main_widget = QWidget()
@@ -211,57 +211,44 @@ class SecureBrowser(QMainWindow):
         default_page = self.browser.page()
         self.profile = default_page.profile() if default_page else None
 
-        # Configure settings and inject screen info
         if self.profile:
             self.configure_browser_settings()
         else:
             print("Warning: No profile available for browser configuration")
 
-        # Custom page for popups and permissions
         self.custom_page = CustomWebEnginePage(self.profile, self.browser)
         self.custom_page.featurePermissionRequested.connect(self.handle_permission_request)
         self.custom_page.fullScreenRequested.connect(self.handle_fullscreen_request)
-        # Certificate errors are handled by certificateError() method in CustomWebEnginePage
 
         self.browser.setPage(self.custom_page)
 
-        # Show a nice loading page first
-        self.show_loading_page()
+        self.browser.setUrl(QUrl("about:blank"))
 
         layout.addWidget(control_panel)
         layout.addWidget(self.browser)
 
-        # Start fullscreen and protections
         self.setWindowFullScreen()
 
-        # Start both protections in parallel immediately (no delay)
         QTimer.singleShot(0, self.start_protections_parallel)
-        # Check monitors early
         QTimer.singleShot(300, self.check_monitors)
 
-        # Security monitoring timers
         self.setup_security_monitoring()
 
-        # React to screen add/remove to update injected script
-        # Note: Screen change monitoring depends on Qt version
         try:
             app = QGuiApplication.instance()
             if app:
-                # Use dynamic attribute access to avoid lint errors
                 if hasattr(app, 'screenAdded'):
                     getattr(app, 'screenAdded').connect(lambda s: self.inject_screen_info_script())
                 if hasattr(app, 'screenRemoved'):
                     getattr(app, 'screenRemoved').connect(lambda s: self.inject_screen_info_script())
-                print("✓ Screen change monitoring enabled")
+                print("Screen change monitoring enabled")
         except (AttributeError, TypeError):
-            # Screen change monitoring not available in this Qt version
             print("Screen change monitoring not available - using static detection")
 
     # -------------------------
     # Browser settings & injection
     # -------------------------
     def configure_browser_settings(self):
-        """Configure browser features and inject the initial screen info script."""
         try:
             if not self.profile:
                 print("Warning: No profile available for configuration")
@@ -271,7 +258,6 @@ class SecureBrowser(QMainWindow):
                 print("Warning: No settings available for configuration")
                 return
 
-            # Basic features
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, True)
@@ -280,45 +266,36 @@ class SecureBrowser(QMainWindow):
             settings.setAttribute(QWebEngineSettings.WebAttribute.WebRTCPublicInterfacesOnly, False)
             settings.setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
-            
-            # Enable experimental web platform features for Window Management API
+
             try:
                 settings.setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
                 settings.setAttribute(QWebEngineSettings.WebAttribute.ShowScrollBars, True)
                 settings.setAttribute(QWebEngineSettings.WebAttribute.TouchIconsEnabled, True)
                 settings.setAttribute(QWebEngineSettings.WebAttribute.FocusOnNavigationEnabled, True)
             except AttributeError:
-                pass  # Some attributes may not exist in all PyQt6 versions
+                pass
             try:
                 settings.setAttribute(QWebEngineSettings.WebAttribute.AllowRunningInsecureContent, True)
                 settings.setAttribute(QWebEngineSettings.WebAttribute.AutoLoadImages, True)
             except AttributeError:
                 pass
 
-            # Inject the screen info script (document creation)
             self.inject_screen_info_script()
-            print("✓ Browser settings configured for exam mode")
+            print("Browser settings configured for exam mode")
         except Exception as e:
             print(f"Warning: Could not configure some browser settings: {e}")
 
     def inject_screen_info_script(self):
-        """Build and (re)insert a document-creation script that injects Qt screen info."""
         if not self.profile:
             return
         try:
-            # Remove existing script with same name if present
             script_collection = self.profile.scripts()
             if not script_collection:
                 print("Warning: No script collection available")
                 return
-            # Get all scripts and filter for our target script
             try:
-                # Try to find and remove existing script
                 existing = []
-                # Simple approach - just try to remove by name if it exists
-                # The QWebEngineScriptCollection API varies between versions
             except AttributeError:
-                # Fallback for different PyQt6 versions
                 existing = []
             for s in existing:
                 script_collection.remove(s)
@@ -337,10 +314,8 @@ class SecureBrowser(QMainWindow):
 
             js_code = f"""
             (function() {{
-                // Store Qt screen information
                 window.__qt_injected_screens = {js_screens};
-                
-                // Implement Window Management API for multi-monitor detection
+
                 if (!navigator.getScreenDetails) {{
                     navigator.getScreenDetails = function() {{
                         const screens = window.__qt_injected_screens.map((screen, index) => ({{
@@ -360,16 +335,15 @@ class SecureBrowser(QMainWindow):
                             width: screen.width,
                             label: screen.name || `Screen ${{index + 1}}`,
                             devicePixelRatio: window.devicePixelRatio || 1
-                        }}));
-                        
+                        }})));
+
                         return Promise.resolve({{
                             screens: screens,
                             currentScreen: screens[0] || null
                         }});
                     }};
                 }}
-                
-                // Enhanced screen object properties
+
                 if (window.screen) {{
                     Object.defineProperty(window.screen, 'isExtended', {{
                         value: window.__qt_injected_screens.length > 1,
@@ -377,15 +351,13 @@ class SecureBrowser(QMainWindow):
                         enumerable: true
                     }});
                 }}
-                
-                // Navigator properties for screen count
+
                 Object.defineProperty(navigator, 'qtScreenCount', {{
                     value: (window.__qt_injected_screens && window.__qt_injected_screens.length) || 0,
                     writable: false,
                     enumerable: true
                 }});
-                
-                // Mock permissions API to always grant window-management permission
+
                 if (navigator.permissions && navigator.permissions.query) {{
                     const originalQuery = navigator.permissions.query;
                     navigator.permissions.query = function(descriptor) {{
@@ -395,7 +367,7 @@ class SecureBrowser(QMainWindow):
                         return originalQuery.call(this, descriptor);
                     }};
                 }}
-                
+
                 console.log('Qt Screen Info Injected: ' + window.__qt_injected_screens.length + ' screens detected');
             }})();
             """
@@ -410,61 +382,22 @@ class SecureBrowser(QMainWindow):
                 script_collection.insert(script)
             except (AttributeError, TypeError) as e:
                 print(f"Could not install script using insert method: {e}")
-                # Alternative approach for script injection
-                pass
 
-            print(f"✓ Injected Qt screen info script (screens={len(js_screens)})")
+            print(f"Injected Qt screen info script (screens={len(js_screens)})")
         except Exception as e:
             print(f"Could not inject screen info script: {e}")
 
-    # -------------------------
-    # Loading / scripts
-    # -------------------------
-    def show_loading_page(self):
-        """Show a CSS spinner inside the WebView as a loading screen."""
-        loading_html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8" />
-            <style>
-                * { box-sizing: border-box; margin: 0; padding: 0; }
-                html,body { height: 100%; }
-                body {
-                    display:flex; align-items:center; justify-content:center;
-                    background-color: #1a202c; font-family: system-ui,Segoe UI,Roboto,Arial;
-                }
-                .container { text-align:center; color:#e2e8f0; padding: 40px; }
-                .spinner { width: 64px; height: 64px; border-radius: 50%; border: 6px solid rgba(99,179,237,0.15); position: relative; margin: 0 auto 18px; }
-                .spinner:before {
-                    content: ''; position:absolute; inset:0; border-radius:50%;
-                    border: 6px solid transparent; border-top-color: #63b3ed;
-                    animation: spin 1s linear infinite;
-                }
-                @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-                h1 { font-size: 20px; margin-top: 4px; margin-bottom: 8px; font-weight:500; color:#f7fafc; }
-                p { color:#cbd5e0; opacity:0.9; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="spinner"></div>
-                <h1>Loading Exam Platform</h1>
-                <p>Please wait while the application initializes...</p>
-            </div>
-        </body>
-        </html>
-        """
-        # setHtml is synchronous but cheap — spinner animation runs in page because UI thread isn't blocked
-        self.browser.setHtml(loading_html)
-
     def load_target_url(self):
-        """Load the target URL; ensure monitoring script injected on successful load."""
-        print("✓ All protections ready, loading exam URL...")
-        # Connect once; disconnect inside callback to avoid multiple bindings
+        if self._target_url_loaded:
+            return
+        if not self.network_protection_ready:
+            print("Skipping URL load until network protection is active")
+            return
+        print("All protections ready, loading exam URL...")
+        self._target_url_loaded = True
+
         def on_load_finished(success):
             try:
-                # inject monitoring script into page (non-document-creation)
                 self.inject_monitoring_scripts(success)
             finally:
                 try:
@@ -476,7 +409,6 @@ class SecureBrowser(QMainWindow):
         self.browser.setUrl(QUrl(self.target_url))
 
     def inject_monitoring_scripts(self, success: bool):
-        """Inject runtime monitoring JS after a page finishes loading."""
         if not success:
             print("Page failed to load")
             return
@@ -485,7 +417,6 @@ class SecureBrowser(QMainWindow):
         (function() {
             console.log('Exam monitoring script loaded - Multi-monitor support enabled');
 
-            // Enhanced screen object properties
             if (window.screen) {
                 const screenProps = {
                     availLeft: window.screen.availLeft || 0,
@@ -507,23 +438,21 @@ class SecureBrowser(QMainWindow):
                 });
             }
 
-            // Screen orientation support
             if (!window.screen.orientation) {
                 try {
                     Object.defineProperty(window.screen, 'orientation', {
-                        value: { 
-                            angle: 0, 
-                            type: 'landscape-primary', 
-                            addEventListener: function(){}, 
-                            removeEventListener: function(){} 
+                        value: {
+                            angle: 0,
+                            type: 'landscape-primary',
+                            addEventListener: function(){},
+                            removeEventListener: function(){}
                         },
-                        writable: false, 
+                        writable: false,
                         enumerable: true
                     });
                 } catch (e) {}
             }
 
-            // Window Management API implementation
             if (!navigator.getScreenDetails) {
                 navigator.getScreenDetails = function() {
                     console.log('getScreenDetails called - providing Qt screen data');
@@ -546,13 +475,12 @@ class SecureBrowser(QMainWindow):
                             label: screen.name || `Display ${index + 1}`,
                             devicePixelRatio: window.devicePixelRatio || 1
                         }));
-                        
+
                         return Promise.resolve({
                             screens: screens,
                             currentScreen: screens[0] || null
                         });
                     } else {
-                        // Fallback to single screen
                         const fallbackScreen = {
                             availHeight: window.screen.availHeight,
                             availLeft: window.screen.availLeft || 0,
@@ -579,7 +507,6 @@ class SecureBrowser(QMainWindow):
                 };
             }
 
-            // Override permissions.query for window-management
             if (navigator.permissions && navigator.permissions.query) {
                 const originalQuery = navigator.permissions.query;
                 navigator.permissions.query = function(descriptor) {
@@ -591,22 +518,19 @@ class SecureBrowser(QMainWindow):
                 };
             }
 
-            // Security monitoring
-            window.addEventListener('blur', function() { 
-                console.log('Window lost focus - exam security event'); 
+            window.addEventListener('blur', function() {
+                console.log('Window lost focus - exam security event');
             });
-            window.addEventListener('focus', function() { 
-                console.log('Window gained focus - exam security event'); 
+            window.addEventListener('focus', function() {
+                console.log('Window gained focus - exam security event');
             });
 
-            // Log screen count for debugging
             const screenCount = (window.__qt_injected_screens && window.__qt_injected_screens.length) || 1;
             console.log(`Screen detection ready: ${screenCount} screen(s) detected`);
 
         })();
         """
-        # run JS in page context
-        self.custom_page.runJavaScript(monitor_script, lambda r: print("✓ Monitoring scripts injected successfully"))
+        self.custom_page.runJavaScript(monitor_script, lambda r: print("Monitoring scripts injected successfully"))
 
     # -------------------------
     # Permissions / fullscreen
@@ -621,26 +545,21 @@ class SecureBrowser(QMainWindow):
             QWebEnginePage.Feature.Geolocation: "Location",
             QWebEnginePage.Feature.Notifications: "Notifications"
         }
-        
-        # Check for window management permissions (newer QtWebEngine versions)
-        # Note: WindowManagement feature may not be available in current PyQt6 version
-        # but we handle it gracefully if it becomes available
-            
+
         feature_name = feature_names.get(feature, f"Unknown Feature ({feature})")
         print(f"Permission requested: {feature_name} from {origin.toString()}")
 
-        # Auto-grant ALL permissions for exam platform functionality
         self.custom_page.setFeaturePermission(
             origin,
             feature,
             QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
         )
-        print(f"✓ {feature_name} permission granted automatically")
+        print(f"{feature_name} permission granted automatically")
 
     def handle_fullscreen_request(self, request):
         print(f"Fullscreen request from: {request.origin().toString()}")
         request.accept()
-        print("✓ Fullscreen request granted")
+        print("Fullscreen request granted")
         if not self.isFullScreen():
             self.showFullScreen()
 
@@ -677,7 +596,7 @@ class SecureBrowser(QMainWindow):
                     self.custom_page.popup_windows.remove(popup)
 
     # -------------------------
-    # Monitor check (uses Qt directly)
+    # Monitor check
     # -------------------------
     def check_monitors(self):
         try:
@@ -689,9 +608,9 @@ class SecureBrowser(QMainWindow):
                     "Multiple Monitors Detected",
                     f"Multiple monitors detected ({len(screens)} total)!\nFor exam security, please use only one monitor."
                 )
-                print(f"✓ Multiple monitor check completed: {len(screens)} monitors found")
+                print(f"Multiple monitor check completed: {len(screens)} monitors found")
             else:
-                print("✓ Single monitor detected - exam security OK")
+                print("Single monitor detected - exam security OK")
         except Exception as e:
             print(f"Error checking monitors: {e}")
 
@@ -699,14 +618,10 @@ class SecureBrowser(QMainWindow):
     # Kiosk / network protection (async)
     # -------------------------
     def start_protections_parallel(self):
-        """Start both kiosk and network protection in parallel to save time."""
         self.start_kiosk_protection_async()
         self.start_network_protection_async()
-        # Start loading URL early, don't wait for all protections
-        QTimer.singleShot(500, self.load_target_url)
 
     def start_kiosk_protection_async(self):
-        """Start kiosk protection on a background thread to avoid UI freeze."""
         if self.kiosk_active:
             return
         try:
@@ -722,31 +637,41 @@ class SecureBrowser(QMainWindow):
 
     def _on_kiosk_started(self):
         self.kiosk_active = True
-        print("✓ Kiosk protection active")
+        print("Kiosk protection active (keyboard + gesture blocking)")
 
     def start_network_protection_async(self):
-        """Start SimpleWall in a background thread; when ready, load the target URL."""
-        if self.simplewall_worker:
+        if self.network_worker:
             return
         try:
-            print("Starting network protection (background)...")
-            self.simplewall_worker = NetworkWorker(self.simplewall_python_exe)
-            self.simplewall_worker.finished_success.connect(self._on_network_ready)
-            self.simplewall_worker.finished_failure.connect(self._on_network_failed)
-            self.simplewall_worker.start()
+            print("Starting network protection (Native Firewall, background)...")
+            self.network_worker = NetworkWorker(self.browser_exe_path)
+            self.network_worker.finished_success.connect(self._on_network_ready)
+            self.network_worker.finished_failure.connect(self._on_network_failed)
+            self.network_worker.start()
         except Exception as e:
             print("Error starting network worker:", e)
-            # fallback: try to load URL anyway
-            QTimer.singleShot(1000, self.load_target_url)
+            self._show_network_failure_dialog(str(e))
 
     def _on_network_ready(self):
-        print("✓ Network protection active (SimpleWall)")
+        print("Network protection active (Native Firewall)")
         self.network_protection_ready = True
-        # URL already loading, just log status
+        self.load_target_url()
 
     def _on_network_failed(self, reason: str):
-        print("✗ Failed to activate network protection:", reason)
-        # URL already loading, continue without network protection
+        print("Failed to activate network protection:", reason)
+        self._show_network_failure_dialog(reason)
+
+    def _show_network_failure_dialog(self, reason: str):
+        if self._shutdown_started:
+            return
+        QMessageBox.critical(
+            self,
+            "Network Protection Failed",
+            "Secure traffic blocking could not be activated.\n\n"
+            "The exam session cannot continue without network protection.\n\n"
+            f"Details: {reason}",
+        )
+        self.safe_exit()
 
     # -------------------------
     # Teardown / exit
@@ -763,7 +688,13 @@ class SecureBrowser(QMainWindow):
             self.safe_exit()
 
     def safe_exit(self):
-        print("Exiting secure browser...")
+        """Single source of truth for all cleanup.
+        Called by confirm_exit, atexit handler, and closeEvent.
+        """
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        print("Exiting secure browser – restoring system state...")
 
         # Stop timers
         try:
@@ -775,7 +706,7 @@ class SecureBrowser(QMainWindow):
             pass
 
         # Close popups
-        if hasattr(self.custom_page, 'popup_windows'):
+        if hasattr(self, 'custom_page') and hasattr(self.custom_page, 'popup_windows'):
             for popup in list(self.custom_page.popup_windows):
                 try:
                     if popup:
@@ -783,7 +714,7 @@ class SecureBrowser(QMainWindow):
                 except Exception:
                     pass
 
-        # Stop kiosk protection
+        # Stop kiosk protection (keyboard hooks + gestures + task manager)
         if self.kiosk_active:
             try:
                 stop_exam_kiosk_mode()
@@ -792,14 +723,15 @@ class SecureBrowser(QMainWindow):
             self.kiosk_active = False
             print("Kiosk protection deactivated")
 
-        # Stop network protection worker cleanly
-        if self.simplewall_worker:
+        # Restore firewall
+        if self.network_worker:
             try:
-                self.simplewall_worker.cleanup()
-                self.simplewall_worker.quit()
-                self.simplewall_worker.wait(1000)
-            except Exception:
-                pass
+                self.network_worker.cleanup()
+                self.network_worker.quit()
+                self.network_worker.wait(2000)
+            except Exception as e:
+                print("Error cleaning up network worker:", e)
+            self.network_worker = None
 
         app = QApplication.instance()
         if app is not None:
@@ -807,8 +739,40 @@ class SecureBrowser(QMainWindow):
         else:
             os._exit(0)
 
+    def closeEvent(self, event):
+        """Intercept window close to guarantee cleanup."""
+        self.safe_exit()
+        event.accept()
+
     def setWindowFullScreen(self):
         self.showFullScreen()
+
+
+# -------------------------
+# Module-level atexit cleanup
+# -------------------------
+_active_browser_instance: SecureBrowser | None = None
+
+
+def _atexit_cleanup():
+    """Last-resort cleanup so the user's internet and gestures are restored
+    even if the app crashes or is killed."""
+    try:
+        if _active_browser_instance and _active_browser_instance.network_worker:
+            _active_browser_instance.network_worker.cleanup()
+    except Exception:
+        pass
+    try:
+        stop_exam_kiosk_mode()
+    except Exception:
+        pass
+    try:
+        emergency_firewall_cleanup()
+    except Exception:
+        pass
+
+
+atexit.register(_atexit_cleanup)
 
 
 # -------------------------
@@ -843,11 +807,49 @@ def ensure_run_as_admin():
         return False
 
 
+def resolve_target_url(argv):
+    url_args = [arg for arg in argv[1:] if not arg.startswith('--')]
+    if not url_args:
+        print("No launch URL provided.")
+        return None
+
+    raw_target = url_args[0]
+    parsed = urlparse(raw_target)
+    if parsed.scheme == 'omniproctor-browser' and parsed.netloc == 'open':
+        query = parse_qs(parsed.query)
+        encoded_target = query.get('url', [''])[0]
+        if encoded_target:
+            decoded_target = unquote(encoded_target).strip()
+            if decoded_target:
+                decoded_parsed = urlparse(decoded_target)
+                if decoded_parsed.scheme in {"http", "https"}:
+                    print(f"Using protocol launch URL: {decoded_target}")
+                    return decoded_target
+        print("Protocol launch URI missing a valid http/https url parameter.")
+        return None
+
+    if parsed.scheme in {"http", "https"}:
+        print(f"Using provided URL: {raw_target}")
+        return raw_target
+
+    print("Provided launch URL is not http/https.")
+    return None
+
+
 if __name__ == "__main__":
+    if "--register-protocol" in sys.argv:
+        sys.exit(0 if register() else 1)
+    if "--unregister-protocol" in sys.argv:
+        sys.exit(0 if unregister() else 1)
+
     if not ensure_run_as_admin():
         sys.exit(1)
 
-    # Add command line arguments for enhanced browser features
+    try:
+        ensure_registered()
+    except Exception as exc:
+        print(f"Protocol self-registration skipped: {exc}")
+
     enhanced_args = sys.argv + [
         '--enable-features=WindowManagement,WebRTC-Hardware-H264-Encoding,WebRTC-Hardware-H264-Decoding',
         '--enable-experimental-web-platform-features',
@@ -867,24 +869,25 @@ if __name__ == "__main__":
     app = QApplication(enhanced_args)
     app.setQuitOnLastWindowClosed(True)
 
-    # Get URL from command line arguments or use default
-    target_url = "https://www.hackerrank.com/test-v2/a3br3sg6cn7/login?b=eyJ1c2VybmFtZSI6ImRlc2FpdmlzaGFsNDkwNEBnbWFpbC5jb20iLCJwYXNzd29yZCI6ImMwODQ3OGYwIiwiaGlkZSI6dHJ1ZSwiYWNjb21tb2RhdGlvbnMiOm51bGx9"
-    
-    # Check for URL argument (skip Qt/PyQt arguments)
-    url_args = [arg for arg in sys.argv[1:] if not arg.startswith('--')]
-    if url_args:
-        target_url = url_args[0]
-        print(f"Using provided URL: {target_url}")
-    else:
-        print(f"Using default URL: {target_url}")
+    target_url = resolve_target_url(sys.argv)
+    if not target_url:
+        QMessageBox.critical(
+            None,
+            "Launch Failed",
+            "No valid launch URL was provided.\n\n"
+            "Open the secure browser from WebClient using the kiosk launch link.",
+        )
+        sys.exit(1)
 
-    # Replace with path to the python exe that SimpleWallController expects, if different
-    python_exe_path = "C:\\Users\\desai\\AppData\\Roaming\\uv\\python\\cpython-3.10.19-windows-x86_64-none\\python.exe"
+    # Dynamic: the exe path for the firewall allow-rule.
+    # When bundled as a .exe via PyInstaller, sys.executable IS the .exe.
+    browser_exe_path = sys.executable
 
     window = SecureBrowser(
         target_url,
-        python_exe_for_simplewall=python_exe_path
+        browser_exe_path=browser_exe_path,
     )
+    _active_browser_instance = window
     window.show()
 
     exit_code = app.exec()
