@@ -222,6 +222,17 @@ class SecureBrowser(QMainWindow):
         except Exception as exc:
             print(f"WARN: could not bind renderProcessTerminated: {exc}")
 
+        # Qt 6.8+ exposes the new QWebEnginePermission API via the
+        # ``permissionRequested`` signal on QWebEngineProfile. This is the
+        # ONLY place where modern permission types (Window Management,
+        # Clipboard Read/Write, Local Fonts, …) are surfaced - the legacy
+        # ``featurePermissionRequested`` signal does not include them.
+        try:
+            self.profile.permissionRequested.connect(self.handle_modern_permission_request)
+            print("Modern permissionRequested signal bound (Qt 6.8+ API)")
+        except (AttributeError, TypeError) as exc:
+            print(f"INFO: modern permissionRequested signal not available: {exc}")
+
         self.browser.setPage(self.custom_page)
         self.browser.setUrl(QUrl("about:blank"))
 
@@ -338,9 +349,28 @@ class SecureBrowser(QMainWindow):
 
                 if (navigator.permissions && navigator.permissions.query) {{
                     const originalQuery = navigator.permissions.query;
+                    const FORCE_GRANTED = new Set([
+                        'window-management',
+                        'window-placement',  // legacy alias used by older sites
+                        'camera',
+                        'microphone',
+                        'clipboard-read',
+                        'clipboard-write',
+                        'notifications',
+                        'fullscreen'
+                    ]);
                     navigator.permissions.query = function(descriptor) {{
-                        if (descriptor && descriptor.name === 'window-management') {{
-                            return Promise.resolve({{ state: 'granted' }});
+                        if (descriptor && FORCE_GRANTED.has(descriptor.name)) {{
+                            // Return a minimal but spec-shaped PermissionStatus.
+                            const status = {{
+                                state: 'granted',
+                                name: descriptor.name,
+                                onchange: null,
+                                addEventListener: function() {{}},
+                                removeEventListener: function() {{}},
+                                dispatchEvent: function() {{ return true; }}
+                            }};
+                            return Promise.resolve(status);
                         }}
                         return originalQuery.call(this, descriptor);
                     }};
@@ -503,6 +533,48 @@ class SecureBrowser(QMainWindow):
             QTimer.singleShot(750, lambda: self.browser.reload())
         except Exception:
             pass
+
+    def handle_modern_permission_request(self, permission):
+        """Auto-grant modern QWebEnginePermission requests (Qt 6.8+).
+
+        This is what HackerRank's "Window Access permission" prompt and
+        similar new W3C permissions (Clipboard, Local Fonts, etc.) flow
+        through. The legacy ``featurePermissionRequested`` slot does not
+        receive these.
+        """
+        try:
+            try:
+                origin_str = permission.origin().toString()
+            except Exception:
+                origin_str = "<unknown origin>"
+            try:
+                ptype = permission.permissionType()
+                ptype_name = getattr(ptype, "name", str(ptype))
+            except Exception:
+                ptype_name = "<unknown type>"
+            print(f"Modern permission requested: {ptype_name} from {origin_str}")
+            try:
+                permission.grant()
+                print(f"  -> granted ({ptype_name})")
+            except Exception as exc:
+                print(f"  -> grant() failed for {ptype_name}: {exc}")
+
+            try:
+                # Surface camera grants on the top bar even when they come in
+                # via the new API instead of the legacy signal.
+                from PyQt6.QtWebEngineCore import QWebEnginePermission as _QP
+                pt = _QP.PermissionType
+                if ptype in (
+                    getattr(pt, "MediaVideoCapture", None),
+                    getattr(pt, "MediaAudioVideoCapture", None),
+                ):
+                    self.top_bar.set_camera_status("ok", "Camera ON")
+                elif ptype == getattr(pt, "MediaAudioCapture", None):
+                    self.top_bar.set_camera_status("ok", "Microphone ON")
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"WARN: handle_modern_permission_request failed: {exc}")
 
     def handle_permission_request(self, origin, feature):
         # Wrap the entire grant path in try/except: any uncaught exception
