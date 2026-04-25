@@ -1,7 +1,22 @@
 import axios from 'axios'
 
+// Resolve the API base URL with the following precedence:
+//   1. window.__APP_CONFIG__.API_BASE_URL  - written at *container start* by
+//      frontend/docker-entrypoint.sh from the API_BASE_URL env var. Lets one
+//      built image be promoted across dev/staging/prod without rebuilding.
+//   2. import.meta.env.VITE_API_BASE_URL    - baked at *build time* (handy
+//      for `npm run dev` and standalone Vite builds).
+//   3. http://localhost:8001/api/v1         - last-resort dev fallback.
+const runtimeConfig =
+  (typeof window !== 'undefined' && window.__APP_CONFIG__) || {}
+
+export const API_BASE_URL =
+  runtimeConfig.API_BASE_URL ||
+  import.meta.env.VITE_API_BASE_URL ||
+  'http://localhost:8001/api/v1'
+
 const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8001/api/v1',
+  baseURL: API_BASE_URL,
 })
 
 const AUTH_ROUTES = ['/auth/login', '/auth/register']

@@ -30,7 +30,10 @@
 #define MyAppPublisher  "OmniProctor"
 #define MyAppURL        "https://omniproctor.example.com"
 #define MyAppExeName    "OmniProctorBrowser.exe"
-#define MyAppId         "{{C9E2A6F0-9B7A-4ABC-9876-OMNIPROC0001}"
+; Stable, real GUID for upgrade detection. Generate a fresh one (Tools >
+; Generate GUID in the Inno IDE, or `python -c "import uuid;print(uuid.uuid4())"`)
+; if you fork this product. Do NOT change once published or upgrades break.
+#define MyAppId         "{{8B1F3A4E-7D29-4F31-9C0A-5E7B6F2D4A91}"
 
 [Setup]
 AppId={#MyAppId}
@@ -55,8 +58,8 @@ Compression=lzma2/ultra
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
 
+; Always elevate; the kiosk needs admin for firewall + global hotkeys.
 PrivilegesRequired=admin
-PrivilegesRequiredOverridesAllowed=
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
 
@@ -102,21 +105,34 @@ Root: HKCR; Subkey: "omniproctor-browser\shell\open"; ValueType: string; ValueNa
 Root: HKCR; Subkey: "omniproctor-browser\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
-; Belt-and-braces: ask the kiosk to (re-)register its protocol handler
-; on every install/upgrade. This is idempotent and covers the case
-; where a user previously ran the EXE without an installer.
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--register-protocol"; Flags: runhidden waituntilterminated; StatusMsg: "Registering URL protocol..."
+; Register the URL protocol handler. This invokes the EXE - if PyInstaller
+; bundled it incorrectly (e.g. missing PyQt6) the install will surface the
+; crash here, which is intentional: better to fail loud at install time
+; than to ship a broken kiosk that crashes when a student clicks Start Test.
+;
+; A non-zero exit from the EXE will fail the install, prompting the user to
+; rebuild the bundle. See README "Smoke-test the EXE before running Inno
+; Setup" for the diagnostic flow.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--register-protocol"; \
+    Flags: runhidden waituntilterminated; \
+    StatusMsg: "Registering URL protocol..."
 
 ; Optional post-install launch.
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
+    Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Safety net: if the kiosk crashed mid-exam, this restores the user's
-; firewall + gestures + Task Manager state before the files are
-; removed. --system-recover is idempotent and exits cleanly even if
-; nothing was left over.
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--system-recover"; Flags: runhidden waituntilterminated; RunOnceId: "OmniProctorSystemRecover"
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--unregister-protocol"; Flags: runhidden waituntilterminated; RunOnceId: "OmniProctorUnregister"
+; Safety net: if the kiosk crashed mid-exam this restores the user's
+; firewall + gestures + Task Manager state before the files are removed.
+; --system-recover is idempotent and exits cleanly even if nothing was
+; left over. skipifdoesntexist guards against the case where the EXE was
+; manually deleted before uninstall.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--system-recover"; \
+    Flags: runhidden waituntilterminated skipifdoesntexist; \
+    RunOnceId: "OmniProctorSystemRecover"
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--unregister-protocol"; \
+    Flags: runhidden waituntilterminated skipifdoesntexist; \
+    RunOnceId: "OmniProctorUnregister"
 
 [UninstallDelete]
 ; The kiosk writes logs and cache under %LOCALAPPDATA% per-user; we

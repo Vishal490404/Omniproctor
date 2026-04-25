@@ -45,5 +45,24 @@ services:
       # GET /api/v1/downloads/installer/windows. See WebClient/installers/README.md.
       - ./installers:/var/lib/omniproctor/installers:ro
 
+  webclient-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: omniproctor-webclient-frontend
+    restart: unless-stopped
+    depends_on:
+      - webclient-api
+    environment:
+      # The kiosk launcher embeds this URL into the omniproctor-browser://
+      # link, so it must be reachable from each student's PC - NOT a docker
+      # network alias. For local dev that's the host-mapped 8001 port; for
+      # an Azure VM deployment override this in docker-compose.prod.yml or
+      # via shell env (e.g. API_BASE_URL=https://omniproctor.example.com/api/v1).
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:8001/api/v1}
+      APP_NAME: ${APP_NAME:-OmniProctor}
+    ports:
+      - "8080:80"
+
 volumes:
   webclient_pgdata:

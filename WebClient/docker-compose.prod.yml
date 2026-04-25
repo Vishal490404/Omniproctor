@@ -1,0 +1,84 @@
+# =============================================================================
+# Production overrides for Azure VM (or any single-host) deployment.
+#
+# Usage on the Azure VM:
+#   cp .env.example .env             # then edit secrets / public URL
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# This file deliberately:
+#   * Removes the source bind-mount on the API container so the image is
+#     fully self-contained (no host volume needed when redeploying).
+#   * Publishes the frontend on port 80 instead of 8080.
+#   * Restarts the DB on failure (no port published - only the API talks to it).
+#   * Pins the public-facing URL via the API_BASE_URL env var so the kiosk
+#     launcher embeds the right address.
+#   * Adds container resource limits + log rotation so a runaway request can't
+#     fill the VM disk or starve other services.
+#
+# Required env vars (set in WebClient/.env on the VM):
+#   API_BASE_URL=https://omniproctor.example.com/api/v1   (or http://<vm-ip>/api/v1)
+#   POSTGRES_PASSWORD=...                                  (rotate before go-live)
+#   SECRET_KEY=...                                         (long random string)
+# =============================================================================
+
+services:
+  db:
+    restart: always
+    # Don't expose Postgres on the host in prod; only the API needs it.
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  webclient-api:
+    restart: always
+    environment:
+      DATABASE_URL: postgresql+psycopg://omniproctor:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/omniproctor
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env}
+      DEBUG: "false"
+      # Lock CORS to the public host of the SPA. Pass a JSON array string.
+      CORS_ORIGINS: ${CORS_ORIGINS:-["*"]}
+    # Remove the dev-only source bind so the image is the source of truth.
+    volumes: !override
+      - ./installers:/var/lib/omniproctor/installers:ro
+    ports:
+      # Expose the API directly on the VM so kiosks can reach it. If you
+      # terminate TLS at Azure Front Door / Application Gateway, change this
+      # back to 127.0.0.1:8000:8000 and let the gateway handle 443.
+      - "8001:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  webclient-frontend:
+    restart: always
+    environment:
+      API_BASE_URL: ${API_BASE_URL:?API_BASE_URL must be set in .env (the URL students will connect to)}
+      APP_NAME: ${APP_NAME:-OmniProctor}
+    ports: !override
+      - "80:80"
+      # Uncomment after wiring TLS certs into nginx.conf:
+      # - "443:443"
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

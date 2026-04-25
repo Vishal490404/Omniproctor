@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <title>Omniproctor</title>
+    <!--
+      Runtime config written by frontend/docker-entrypoint.sh on container
+      start. Loaded BEFORE the SPA bundle so window.__APP_CONFIG__ is
+      available the first time api/client.js evaluates. Missing in `npm run
+      dev` (returns 404), which is fine - the SPA falls back to
+      VITE_API_BASE_URL in that case.
+    -->
+    <script src="/config.js"></script>
   </head>
   <body>
     <div id="root"></div>

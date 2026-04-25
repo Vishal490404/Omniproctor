@@ -1,15 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for the OmniProctor secure kiosk browser.
 
-Build with:
+Build with (from the Browser/ directory, with the project venv active):
+
+    uv sync                                        # ensure deps are present
     uv run pyinstaller OmniProctorBrowser.spec --noconfirm --clean
 
 Output:
+
     dist/OmniProctorBrowser/OmniProctorBrowser.exe
     dist/OmniProctorBrowser/_internal/...
 
-Key requirements that *must* hold for the kiosk to actually work in
-production - if you tweak this file, re-validate each:
+Hard requirements - if you tweak this file, re-validate each:
 
   * `--onedir` (collected by COLLECT below). Do NOT switch to onefile -
     the WFP firewall controller resolves QtWebEngineProcess.exe by
@@ -20,78 +22,132 @@ production - if you tweak this file, re-validate each:
     the kiosk launches unelevated, the firewall controller throws
     AdminRightsError, and external traffic is NOT blocked.
 
-  * QtWebEngineProcess.exe and the Qt6/resources + Qt6/translations
-    directories must end up under _internal/PyQt6/Qt6/. The
-    PyInstaller PyQt6 hook usually handles this, but we explicitly
-    request the data files below as belt-and-braces.
+  * `_internal/PyQt6/Qt6/bin/Qt6WebEngineCore.dll` and
+    `_internal/PyQt6/Qt6/QtWebEngineProcess.exe` MUST exist after build.
+    `collect_all('PyQt6')` below guarantees this; do not replace it
+    with `collect_data_files` alone (data files do not include
+    binaries, which is what bit a previous iteration of this spec).
 
-  * `keyboard` package data files (DLL hooks for Windows). The hook
-    that ships with PyInstaller covers this; collect_submodules is
-    here to cover the rare case of a custom site-packages layout.
+  * Build interpreter parity. PyInstaller bundles whatever is on
+    `sys.path` at analysis time. If you run pyinstaller from a venv
+    that doesn't have PyQt6 installed, the resulting EXE imports it at
+    runtime and crashes with `ModuleNotFoundError: No module named
+    'PyQt6'`. The `uv run` form above forces use of the project venv.
 """
 
 import os
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+import sys
+
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
 # ---------------------------------------------------------------------------
-# Data files: QtWebEngine resources + our own assets/themes
+# PyQt6 + QtWebEngine - bundle every binary, data file, and submodule.
+#
+# collect_all() returns (datas, binaries, hiddenimports). This is the
+# bulletproof idiom: it pulls in Qt6 DLLs, QtWebEngineProcess.exe, ICU
+# data, locales, and every QtCore/QtGui/QtWidgets/QtWebEngine* module so
+# we don't have to guess what main.py imports today vs. tomorrow.
 # ---------------------------------------------------------------------------
-datas = []
-datas += collect_data_files(
-    "PyQt6",
-    includes=[
-        "Qt6/resources/*",
-        "Qt6/translations/qtwebengine_locales/*",
-        "Qt6/translations/qt_*.qm",
-    ],
-)
+pyqt6_datas, pyqt6_binaries, pyqt6_hidden = collect_all("PyQt6")
 
-# Our bundled UI assets (icon, logo, theme).
-_asset_pairs = [
+# Some PyQt6 wheels split QtWebEngine into a sibling distribution
+# ("PyQt6-WebEngine") whose top-level Python package is still "PyQt6".
+# collect_all gracefully no-ops when the dist isn't installed under that
+# name, so calling it is safe either way.
+try:
+    we_datas, we_binaries, we_hidden = collect_all("PyQt6_WebEngine")
+except Exception:
+    we_datas, we_binaries, we_hidden = [], [], []
+
+# `keyboard` ships Windows-specific hooks loaded via importlib at
+# runtime; collect_submodules ensures every backend gets bundled.
+keyboard_hidden = collect_submodules("keyboard")
+
+# ---------------------------------------------------------------------------
+# Our own assets (icon, logo, theme).
+# ---------------------------------------------------------------------------
+asset_datas = []
+for src, dst in (
     ("browser/assets/icon.ico", "browser/assets"),
     ("browser/assets/icon.svg", "browser/assets"),
     ("browser/assets/logo_white.svg", "browser/assets"),
     ("browser/ui/theme.qss", "browser/ui"),
-]
-for src, dst in _asset_pairs:
+):
     if os.path.isfile(src):
-        datas.append((src, dst))
+        asset_datas.append((src, dst))
+    else:
+        # Fail loud during build - shipping without an icon or theme is
+        # almost always a mistake.
+        print(f"[spec] WARNING: missing asset {src!r} - it will not be bundled.",
+              file=sys.stderr)
+
+datas = pyqt6_datas + we_datas + asset_datas
+binaries = pyqt6_binaries + we_binaries
 
 # ---------------------------------------------------------------------------
-# Hidden imports - things PyInstaller's static analysis misses.
+# Hidden imports - things PyInstaller's static analysis cannot see.
+#
+# main.py imports the in-tree packages by their bare names (`from
+# telemetry import ...`) thanks to pathex below. List them explicitly
+# so they survive a future refactor where some are imported lazily.
 # ---------------------------------------------------------------------------
-hiddenimports = []
-hiddenimports += collect_submodules("keyboard")
-hiddenimports += collect_submodules("PyQt6.QtWebEngineCore")
-# Telemetry modules are imported lazily inside main.py's safe_exit
-# (see: from telemetry import post_attempt_end). PyInstaller usually
-# picks these up from the explicit imports at module top, but list them
-# explicitly so a future refactor can't silently break the build.
-hiddenimports += [
-    "telemetry",
-    "telemetry.poster",
-    "telemetry.event_bus",
-    "telemetry.warning_poller",
-    "telemetry.keystroke_logger",
-    "telemetry.config",
-    "security.vm_detect",
-    "security.suspicious_procs",
-    "network.wfp_native",
-    "network.native_firewall_controller",
-]
+hiddenimports = (
+    pyqt6_hidden
+    + we_hidden
+    + keyboard_hidden
+    + [
+        "PyQt6",
+        "PyQt6.sip",
+        "PyQt6.QtCore",
+        "PyQt6.QtGui",
+        "PyQt6.QtWidgets",
+        "PyQt6.QtWebEngineCore",
+        "PyQt6.QtWebEngineWidgets",
+        # In-tree packages
+        "telemetry",
+        "telemetry.poster",
+        "telemetry.event_bus",
+        "telemetry.warning_poller",
+        "telemetry.keystroke_logger",
+        "telemetry.config",
+        "security",
+        "security.vm_detect",
+        "security.suspicious_procs",
+        "network",
+        "network.wfp_native",
+        "network.native_firewall_controller",
+        "ui",
+        "ui.splash",
+        "ui.warning_banner",
+        "ui.top_bar",
+        "ui.dialogs",
+        "ui.theme",
+        "keyblocks",
+        "log_setup",
+        "protocol_handler",
+        "web_profile",
+        "win11_compat",
+    ]
+)
 
 a = Analysis(
     ["browser/main.py"],
+    # pathex adds `browser/` to sys.path so the in-tree imports above
+    # (`from keyblocks import ...`, `from telemetry import ...`, etc.)
+    # resolve. Without this PyInstaller would fail at analysis time.
     pathex=["browser"],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "unittest", "test", "pytest", "IPython", "jedi"],
+    # NOTE: do NOT exclude "test" here - it transitively prunes any
+    # module under a `.test.` namespace, including some PyQt6 internals
+    # in older wheels. tkinter/IPython/jedi are safe to drop.
+    excludes=["tkinter", "IPython", "jedi", "pytest"],
     cipher=block_cipher,
     noarchive=False,
 )
@@ -107,7 +163,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,  # UPX is incompatible with QtWebEngineProcess.exe
+    upx=False,  # UPX corrupts QtWebEngineProcess.exe + signed binaries
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -115,9 +171,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon="browser/assets/icon.ico",
-    # Mandatory: bake requireAdministrator into the manifest so the
-    # kiosk always runs elevated. Firewall + global hotkey blocks
-    # require admin and the kiosk aborts with a fatal error otherwise.
     uac_admin=True,
     uac_uiaccess=False,
     version=None,
