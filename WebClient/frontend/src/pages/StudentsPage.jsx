@@ -3,7 +3,6 @@ import {
   Button,
   Card,
   Group,
-  Modal,
   Select,
   Stack,
   Table,
@@ -14,10 +13,11 @@ import {
   Title,
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
+import { IconActivity } from '@tabler/icons-react'
 import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
-import { attemptsApi, behaviorApi, testsApi, usersApi } from '../api/services'
-import { formatDateIST } from '../utils/time'
+import { testsApi, usersApi } from '../api/services'
 
 export function StudentsPage() {
   const [students, setStudents] = useState([])
@@ -34,10 +34,8 @@ export function StudentsPage() {
   const [copyTargetTest, setCopyTargetTest] = useState('')
   const [copyLoading, setCopyLoading] = useState(false)
   const [copySummary, setCopySummary] = useState(null)
-  const [detailsOpen, setDetailsOpen] = useState(false)
-  const [selectedDetailsStudent, setSelectedDetailsStudent] = useState(null)
-  const [studentAttempts, setStudentAttempts] = useState([])
-  const [studentEvents, setStudentEvents] = useState([])
+
+  const navigate = useNavigate()
 
   const getErrorMessage = (error, fallback = 'Try again') => {
     const detail = error?.response?.data?.detail
@@ -203,21 +201,13 @@ export function StudentsPage() {
     }
   }
 
-  const openStudentDetails = async (student) => {
-    if (!selectedTest) return
-
-    setSelectedDetailsStudent(student)
-    setDetailsOpen(true)
-    try {
-      const [attemptsResp, eventsResp] = await Promise.all([
-        attemptsApi.listForStudent(selectedTest, student.student_id),
-        behaviorApi.eventsForTestStudent(selectedTest, student.student_id),
-      ])
-      setStudentAttempts(attemptsResp.data)
-      setStudentEvents(eventsResp.data)
-    } catch (error) {
-      notifications.show({ color: 'red', title: 'Unable to load student details', message: getErrorMessage(error) })
-    }
+  const openStudentLogs = (student) => {
+    if (!selectedTest || !student?.student_id) return
+    const params = new URLSearchParams({
+      testId: String(selectedTest),
+      studentId: String(student.student_id),
+    })
+    navigate(`/portal/logs?${params.toString()}`)
   }
 
   const filteredAssignedStudents = useMemo(() => {
@@ -389,7 +379,14 @@ export function StudentsPage() {
                       <Table.Td>{new Date(item.assigned_at).toLocaleString()}</Table.Td>
                       <Table.Td>
                         <Group gap="xs">
-                          <Button size="xs" variant="light" onClick={() => openStudentDetails(item)}>Attempts & logs</Button>
+                          <Button
+                            size="xs"
+                            variant="light"
+                            leftSection={<IconActivity size={14} />}
+                            onClick={() => openStudentLogs(item)}
+                          >
+                            Attempt logs
+                          </Button>
                           <Button size="xs" color="red" variant="light" onClick={() => removeStudent(item.student_id)}>Remove</Button>
                         </Group>
                       </Table.Td>
@@ -427,74 +424,6 @@ export function StudentsPage() {
         </div>
       </Card>
 
-      <Modal
-        opened={detailsOpen}
-        onClose={() => setDetailsOpen(false)}
-        title={selectedDetailsStudent ? `Attempts & logs - ${selectedDetailsStudent.full_name}` : 'Attempts & logs'}
-        size="xl"
-      >
-        <Stack>
-          <Card withBorder radius="md" p="sm">
-            <Title order={5}>Attempt history</Title>
-            {studentAttempts.length === 0 ? (
-              <Text size="sm" c="dimmed">No attempts recorded yet.</Text>
-            ) : (
-              <Table striped withTableBorder mt="xs">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>ID</Table.Th>
-                    <Table.Th>Status</Table.Th>
-                    <Table.Th>Started</Table.Th>
-                    <Table.Th>Ended</Table.Th>
-                    <Table.Th>Reason</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {studentAttempts.map((attempt) => (
-                    <Table.Tr key={attempt.id}>
-                      <Table.Td>{attempt.id}</Table.Td>
-                      <Table.Td>{attempt.status}</Table.Td>
-                      <Table.Td>{formatDateIST(attempt.started_at)}</Table.Td>
-                      <Table.Td>{formatDateIST(attempt.ended_at)}</Table.Td>
-                      <Table.Td>{attempt.ended_reason || '—'}</Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            )}
-          </Card>
-
-          <Card withBorder radius="md" p="sm">
-            <Title order={5}>Behavior logs</Title>
-            {studentEvents.length === 0 ? (
-              <Text size="sm" c="dimmed">No behavior events recorded yet.</Text>
-            ) : (
-              <Table striped withTableBorder mt="xs">
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Time</Table.Th>
-                    <Table.Th>Type</Table.Th>
-                    <Table.Th>Severity</Table.Th>
-                    <Table.Th>Attempt</Table.Th>
-                    <Table.Th>Payload</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {studentEvents.map((event) => (
-                    <Table.Tr key={event.id}>
-                      <Table.Td>{formatDateIST(event.event_time)}</Table.Td>
-                      <Table.Td>{event.event_type}</Table.Td>
-                      <Table.Td>{event.severity}</Table.Td>
-                      <Table.Td>{event.attempt_id}</Table.Td>
-                      <Table.Td>{event.payload ? JSON.stringify(event.payload) : '—'}</Table.Td>
-                    </Table.Tr>
-                  ))}
-                </Table.Tbody>
-              </Table>
-            )}
-          </Card>
-        </Stack>
-      </Modal>
     </Stack>
   )
 }

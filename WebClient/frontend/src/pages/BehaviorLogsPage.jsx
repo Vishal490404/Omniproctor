@@ -39,7 +39,8 @@ import {
   IconShieldExclamation,
   IconX,
 } from '@tabler/icons-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import { behaviorApi, testsApi } from '../api/services'
 import { formatDateIST } from '../utils/time'
@@ -207,10 +208,14 @@ function downloadJson(filename, data) {
 }
 
 export function BehaviorLogsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const initialTestId = searchParams.get('testId') || ''
+  const initialStudentId = searchParams.get('studentId') || ''
+
   const [tests, setTests] = useState([])
   const [studentsForTest, setStudentsForTest] = useState([])
-  const [selectedTest, setSelectedTest] = useState('')
-  const [selectedStudent, setSelectedStudent] = useState('')
+  const [selectedTest, setSelectedTest] = useState(initialTestId)
+  const [selectedStudent, setSelectedStudent] = useState(initialStudentId)
   const [events, setEvents] = useState([])
   const [loading, setLoading] = useState(false)
 
@@ -220,6 +225,8 @@ export function BehaviorLogsPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [page, setPage] = useState(1)
   const [drawerEvent, setDrawerEvent] = useState(null)
+
+  const pendingDeepLinkRef = useRef(Boolean(initialTestId && initialStudentId))
 
   const getErrorMessage = (error, fallback = 'Try again') => {
     const detail = error?.response?.data?.detail
@@ -252,16 +259,34 @@ export function BehaviorLogsPage() {
       try {
         const { data } = await testsApi.studentsForTest(selectedTest)
         setStudentsForTest(data)
+        if (pendingDeepLinkRef.current) {
+          const exists = data.some((s) => String(s.student_id) === String(selectedStudent))
+          if (!exists) {
+            setSelectedStudent('')
+            pendingDeepLinkRef.current = false
+            notifications.show({
+              color: 'orange',
+              title: 'Student not assigned',
+              message: 'The linked student is no longer assigned to this test.',
+            })
+          }
+        } else {
+          setSelectedStudent('')
+        }
       } catch (error) {
         notifications.show({ color: 'red', title: 'Failed to load students', message: getErrorMessage(error) })
       }
     }
     loadStudentsForTest()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTest])
 
-  const loadEvents = async () => {
+  const loadEvents = async (options = {}) => {
+    const { silent = false } = options
     if (!selectedTest || !selectedStudent) {
-      notifications.show({ color: 'orange', title: 'Selection required', message: 'Pick both test and student' })
+      if (!silent) {
+        notifications.show({ color: 'orange', title: 'Selection required', message: 'Pick both test and student' })
+      }
       return
     }
     setLoading(true)
@@ -275,6 +300,18 @@ export function BehaviorLogsPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (!pendingDeepLinkRef.current) return
+    if (!selectedTest || !selectedStudent) return
+    if (studentsForTest.length === 0) return
+    const exists = studentsForTest.some((s) => String(s.student_id) === String(selectedStudent))
+    if (!exists) return
+    pendingDeepLinkRef.current = false
+    loadEvents({ silent: true })
+    setSearchParams({}, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTest, selectedStudent, studentsForTest])
 
   // ---------------------------------------------------------------- Derived
   const eventTypeOptions = useMemo(() => {
