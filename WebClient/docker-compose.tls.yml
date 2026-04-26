@@ -1,0 +1,45 @@
+# =============================================================================
+# TLS/Caddy reverse proxy override for production deployment.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     -f docker-compose.tls.yml up -d --build
+#
+# This file:
+#   * Removes direct ports from API and frontend (they only listen on docker network)
+#   * Adds Caddy as a TLS-terminating reverse proxy on ports 80/443
+#   * Requires a Caddyfile in the WebClient root directory
+# =============================================================================
+
+services:
+  webclient-api:
+    # Remove the port mapping; only Caddy exposes ports on the host
+    ports: []
+
+  webclient-frontend:
+    # Remove the port mapping; only Caddy exposes ports on the host
+    ports: []
+
+  caddy:
+    image: caddy:2
+    container_name: omniproctor-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - webclient-frontend
+      - webclient-api
+    environment:
+      # Make API_BASE_URL available to Caddy if needed
+      API_BASE_URL: ${API_BASE_URL:-https://omniproctor.example.com}
+
+volumes:
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
