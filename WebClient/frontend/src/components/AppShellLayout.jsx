@@ -11,11 +11,12 @@ import {
   IconSun,
   IconUsers,
 } from '@tabler/icons-react'
-import { ActionIcon, AppShell, Avatar, Burger, Button, Group, NavLink, Stack, Text, Tooltip } from '@mantine/core'
+import { ActionIcon, AppShell, Avatar, Burger, Button, Group, NavLink, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import { BrandLogo } from './BrandLogo'
 import { useAuth } from '../context/AuthContext'
 import { useColorSchemePreference } from '../context/ColorSchemeContext'
 
@@ -60,10 +61,15 @@ export function AppShellLayout({ children }) {
             >
               {desktopCollapsed ? <IconChevronRight size={18} /> : <IconChevronLeft size={18} />}
             </ActionIcon>
-            <Group gap="xs" wrap="nowrap">
-              <div className="brand-dot" />
-              <Text fw={700} size="lg">Omniproctor</Text>
-            </Group>
+            <UnstyledButton
+              onClick={() => navigate(user?.role === 'student' ? '/student' : '/portal/tests')}
+              aria-label="Go to dashboard home"
+            >
+              <Group gap="xs" wrap="nowrap">
+                <BrandLogo size={28} />
+                <Text fw={700} size="lg">OmniProctor</Text>
+              </Group>
+            </UnstyledButton>
           </Group>
           <Group wrap="nowrap" gap="sm">
             <Tooltip label={colorScheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>

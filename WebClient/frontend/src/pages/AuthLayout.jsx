@@ -5,6 +5,8 @@ import {
   IconShieldCheck,
 } from '@tabler/icons-react'
 
+import { BrandLogo } from '../components/BrandLogo'
+
 const FEATURES = [
   {
     icon: IconShieldCheck,
@@ -36,7 +38,7 @@ export function AuthLayout({ children }) {
       <Box className="auth-brand">
         <Stack gap="xl" justify="space-between" h="100%">
           <Group gap="sm">
-            <Box className="auth-brand-mark" />
+            <BrandLogo size={42} radius={12} className="auth-brand-mark" />
             <Title order={2} c="white" fw={700}>
               OmniProctor
             </Title>
@@ -47,7 +49,7 @@ export function AuthLayout({ children }) {
               Run secure online exams without breaking trust.
             </Title>
             <Text c="rgba(255,255,255,0.78)" size="md" lh={1.55}>
-              The teacher dashboard, kiosk browser and live monitoring stack -
+              The dashboard, kiosk browser and live monitoring stack -
               one platform, deployed on your own infrastructure.
             </Text>
           </Stack>

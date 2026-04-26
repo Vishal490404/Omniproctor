@@ -160,9 +160,7 @@ export function DownloadsPage() {
       <Stack gap={2}>
         <Title order={2}>Downloads</Title>
         <Text size="sm" c="dimmed">
-          Install the OmniProctor secure kiosk browser to take exams. The
-          installer also registers the <Code>omniproctor-browser://</Code>{' '}
-          URL handler so kiosk launch links work from this dashboard.
+          Install the OmniProctor secure kiosk browser to take exams.
         </Text>
       </Stack>
 
@@ -181,7 +179,7 @@ export function DownloadsPage() {
                 <Stack gap={2}>
                   <Title order={3}>Windows 10 / 11</Title>
                   <Text size="sm" c="dimmed">
-                    64-bit · Inno Setup installer · admin rights required
+                    64-bit
                   </Text>
                 </Stack>
               </Group>
@@ -275,7 +273,7 @@ export function DownloadsPage() {
                 network firewall.
               </Text>
               <Text size="sm">
-                <b>4.</b> Return to your dashboard and click{' '}
+                <b>3.</b> Return to your dashboard and click{' '}
                 <i>Open in kiosk browser</i> on any assigned test.
               </Text>
             </Stack>
