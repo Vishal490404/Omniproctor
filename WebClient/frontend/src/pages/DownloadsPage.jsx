@@ -275,10 +275,6 @@ export function DownloadsPage() {
                 network firewall.
               </Text>
               <Text size="sm">
-                <b>3.</b> Leave the “Register the omniproctor-browser:// URL
-                protocol” option checked, then click <i>Install</i>.
-              </Text>
-              <Text size="sm">
                 <b>4.</b> Return to your dashboard and click{' '}
                 <i>Open in kiosk browser</i> on any assigned test.
               </Text>
