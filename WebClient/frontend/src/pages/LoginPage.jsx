@@ -1,10 +1,22 @@
-import { Button, Card, Group, PasswordInput, Stack, Text, TextInput, Title } from '@mantine/core'
+import {
+  Anchor,
+  Box,
+  Button,
+  Group,
+  PasswordInput,
+  Stack,
+  Text,
+  TextInput,
+  Title,
+} from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { useForm } from '@mantine/form'
+import { IconArrowRight, IconLock, IconMail } from '@tabler/icons-react'
 import { Link, useNavigate } from 'react-router-dom'
 
 import { authApi } from '../api/services'
 import { useAuth } from '../context/AuthContext'
+import { AuthLayout } from './AuthLayout'
 
 export function LoginPage() {
   const navigate = useNavigate()
@@ -13,8 +25,10 @@ export function LoginPage() {
   const form = useForm({
     initialValues: { email: '', password: '' },
     validate: {
-      email: (value) => (/^\S+@\S+\.\S+$/.test(value) ? null : 'Invalid email'),
-      password: (value) => (value.length >= 8 ? null : 'Min 8 characters'),
+      email: (value) =>
+        /^\S+@\S+\.\S+$/.test(value) ? null : 'Enter a valid email address',
+      password: (value) =>
+        value.length >= 8 ? null : 'Password must be at least 8 characters',
     },
   })
 
@@ -37,19 +51,74 @@ export function LoginPage() {
   })
 
   return (
-    <Group justify="center" mt={70}>
-      <Card className="surface-card" shadow="sm" radius="lg" p="xl" w={430}>
-        <Title order={2}>Welcome back</Title>
-        <Text c="dimmed" size="sm" mt={4}>Login to manage tests and assignments</Text>
-        <form onSubmit={onSubmit}>
-          <Stack mt="lg">
-            <TextInput label="Email" placeholder="you@example.com" withAsterisk {...form.getInputProps('email')} />
-            <PasswordInput label="Password" placeholder="Your password" withAsterisk {...form.getInputProps('password')} />
-            <Button type="submit">Sign in</Button>
-            <Text size="sm">Need an account? <Link to="/register">Create one</Link></Text>
-          </Stack>
-        </form>
-      </Card>
-    </Group>
+    <AuthLayout>
+      <Stack gap="xl">
+        <Stack gap={6}>
+          <Text size="sm" c="dimmed" fw={500}>
+            Welcome back
+          </Text>
+          <Title order={1} fz={34} lh={1.15}>
+            Sign in to your dashboard
+          </Title>
+          <Text c="dimmed" size="sm">
+            Enter your credentials to manage tests, monitor live sessions and
+            review behaviour logs.
+          </Text>
+        </Stack>
+
+        <Box className="auth-card">
+          <form onSubmit={onSubmit}>
+            <Stack gap="md">
+              <TextInput
+                label="Email address"
+                placeholder="you@school.edu"
+                size="md"
+                radius="md"
+                leftSection={<IconMail size={18} stroke={1.6} />}
+                withAsterisk
+                {...form.getInputProps('email')}
+              />
+              <PasswordInput
+                label="Password"
+                placeholder="At least 8 characters"
+                size="md"
+                radius="md"
+                leftSection={<IconLock size={18} stroke={1.6} />}
+                withAsterisk
+                {...form.getInputProps('password')}
+              />
+
+              <Button
+                type="submit"
+                size="md"
+                radius="md"
+                className="auth-submit-btn"
+                rightSection={<IconArrowRight size={18} stroke={1.8} />}
+                loading={form.submitting}
+                fullWidth
+              >
+                Sign in
+              </Button>
+
+              <Box className="auth-divider">or</Box>
+
+              <Group justify="center" gap={6}>
+                <Text size="sm" c="dimmed">
+                  New here?
+                </Text>
+                <Anchor component={Link} to="/register" size="sm" fw={600}>
+                  Create an account
+                </Anchor>
+              </Group>
+            </Stack>
+          </form>
+        </Box>
+
+        <Text size="xs" c="dimmed" ta="center">
+          By signing in you agree to OmniProctor's terms and acknowledge that
+          test sessions are recorded and analysed for academic integrity.
+        </Text>
+      </Stack>
+    </AuthLayout>
   )
 }

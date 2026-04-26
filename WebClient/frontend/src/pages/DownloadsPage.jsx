@@ -13,6 +13,7 @@ import {
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
+  IconBrandGithub,
   IconBrandWindows,
   IconCheck,
   IconDownload,
@@ -64,8 +65,35 @@ export function DownloadsPage() {
     loadManifest()
   }, [loadManifest])
 
+  const handleExternalDownload = (windowsInfo) => {
+    // Open the GitHub (or other) Releases URL in a new tab. We skip the
+    // axios blob streaming path entirely because:
+    //   1. The download endpoint replies 307 with a Location header
+    //      pointing at github.com - axios+blob doesn't follow cross-origin
+    //      redirects cleanly (CORS preflight would fail).
+    //   2. There's no point streaming a public-Internet URL through our
+    //      backend - GitHub's CDN serves it faster directly.
+    // The browser handles the .exe download via the asset's Content-
+    // Disposition header.
+    notifications.show({
+      title: 'Opening download link',
+      message: `Your browser will download ${windowsInfo.filename || 'the installer'} from GitHub.`,
+      color: 'blue',
+      icon: <IconExternalLink size={16} />,
+      autoClose: 4000,
+    })
+    window.open(windowsInfo.url, '_blank', 'noopener,noreferrer')
+  }
+
   const handleDownload = async () => {
-    if (downloading) return
+    const windowsInfo = manifest?.windows
+    if (!windowsInfo?.available || downloading) return
+
+    if (windowsInfo.external) {
+      handleExternalDownload(windowsInfo)
+      return
+    }
+
     setDownloading(true)
     setProgress(0)
     const toastId = `installer-download-${Date.now()}`
@@ -93,7 +121,7 @@ export function DownloadsPage() {
           })
         }
       })
-      saveBlobResponse(response, manifest?.windows?.filename || 'OmniProctorKioskSetup.exe')
+      saveBlobResponse(response, windowsInfo.filename || 'OmniProctorKioskSetup.exe')
       notifications.update({
         id: toastId,
         title: 'Installer downloaded',
@@ -170,25 +198,39 @@ export function DownloadsPage() {
 
             {available ? (
               <Stack gap={6}>
-                <Text size="sm">
-                  <Text component="span" c="dimmed">Filename:</Text>{' '}
-                  <Code>{windows.filename}</Code>
-                </Text>
-                <Text size="sm">
-                  <Text component="span" c="dimmed">Size:</Text>{' '}
-                  {formatBytes(windows.size_bytes)}
-                </Text>
-                <Text size="sm">
-                  <Text component="span" c="dimmed">SHA-256:</Text>{' '}
-                  <Code title={windows.sha256}>{shortHash(windows.sha256)}</Code>
-                </Text>
+                {windows.external && (
+                  <Group gap={6} wrap="nowrap">
+                    <IconBrandGithub size={14} />
+                    <Text size="xs" c="dimmed">
+                      Hosted on GitHub Releases
+                    </Text>
+                  </Group>
+                )}
+                {windows.filename && (
+                  <Text size="sm">
+                    <Text component="span" c="dimmed">Filename:</Text>{' '}
+                    <Code>{windows.filename}</Code>
+                  </Text>
+                )}
+                {windows.size_bytes ? (
+                  <Text size="sm">
+                    <Text component="span" c="dimmed">Size:</Text>{' '}
+                    {formatBytes(windows.size_bytes)}
+                  </Text>
+                ) : null}
+                {windows.sha256 ? (
+                  <Text size="sm">
+                    <Text component="span" c="dimmed">SHA-256:</Text>{' '}
+                    <Code title={windows.sha256}>{shortHash(windows.sha256)}</Code>
+                  </Text>
+                ) : null}
               </Stack>
             ) : (
               <Alert color="orange" icon={<IconInfoCircle size={16} />} title="Not yet uploaded">
-                Ask an administrator to publish the kiosk installer. Once
-                <Code> OmniProctorKioskSetup.exe </Code>
-                is dropped into the server's installers directory, it will
-                appear here automatically.
+                Ask an administrator to publish the kiosk installer. Either set{' '}
+                <Code>INSTALLER_WINDOWS_URL</Code> to a GitHub Releases asset, or
+                drop <Code>OmniProctorKioskSetup.exe</Code> into the server's
+                installers directory. It will appear here automatically.
               </Alert>
             )}
 
@@ -196,12 +238,25 @@ export function DownloadsPage() {
 
             <Group gap="sm">
               <Button
-                leftSection={<IconDownload size={16} />}
+                leftSection={
+                  windows?.external
+                    ? <IconBrandGithub size={16} />
+                    : <IconDownload size={16} />
+                }
+                rightSection={
+                  windows?.external
+                    ? <IconExternalLink size={14} />
+                    : null
+                }
                 onClick={handleDownload}
                 loading={downloading}
                 disabled={!available}
               >
-                {downloading ? `${progress}%` : 'Download for Windows'}
+                {downloading
+                  ? `${progress}%`
+                  : windows?.external
+                    ? 'Download from GitHub'
+                    : 'Download for Windows'}
               </Button>
             </Group>
           </Stack>

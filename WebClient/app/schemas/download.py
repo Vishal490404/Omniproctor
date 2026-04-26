@@ -22,7 +22,20 @@ class InstallerInfo(BaseModel):
         default=None, description="SHA-256 of the installer for verification"
     )
     url: Optional[str] = Field(
-        default=None, description="Authenticated download URL (relative to API base)"
+        default=None,
+        description=(
+            "Download URL. Relative path (`/api/v1/...`) when the installer is "
+            "hosted on this server, absolute https:// URL when it is hosted "
+            "externally (GitHub Releases, blob storage, etc.)."
+        ),
+    )
+    external: bool = Field(
+        default=False,
+        description=(
+            "True when ``url`` points to an external host. The SPA should "
+            "open it in a new tab instead of streaming through the auth-"
+            "required download endpoint."
+        ),
     )
 
 

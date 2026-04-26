@@ -47,13 +47,15 @@ services:
       # Lock CORS to the public host of the SPA. Pass a JSON array string.
       CORS_ORIGINS: ${CORS_ORIGINS:-["*"]}
     # Remove the dev-only source bind so the image is the source of truth.
-    volumes:
+    # !override replaces the entire list rather than merging with the dev
+    # compose file's `./app:/app/app` mount.
+    volumes: !override
       - ./installers:/var/lib/omniproctor/installers:ro
-    ports:
-      # Expose the API directly on the VM so kiosks can reach it. If you
-      # terminate TLS at Azure Front Door / Application Gateway, change this
-      # back to 127.0.0.1:8000:8000 and let the gateway handle 443.
-      - "8001:8000"
+    # No published ports in prod - Caddy reaches the API over the internal
+    # docker network on `webclient-api:8000`. To bypass Caddy temporarily
+    # for debugging, change to ["127.0.0.1:8001:8000"] (loopback only,
+    # never 0.0.0.0) and tunnel via SSH.
+    ports: !reset []
     deploy:
       resources:
         limits:
@@ -69,10 +71,10 @@ services:
     environment:
       API_BASE_URL: ${API_BASE_URL:?API_BASE_URL must be set in .env (the URL students will connect to)}
       APP_NAME: ${APP_NAME:-OmniProctor}
-    ports:
-      - "80:80"
-      # Uncomment after wiring TLS certs into nginx.conf:
-      # - "443:443"
+    # No published ports - Caddy reverse-proxies to webclient-frontend:80
+    # over the internal docker network. To bypass Caddy temporarily for
+    # debugging, change to ["127.0.0.1:8080:80"] and tunnel via SSH.
+    ports: !reset []
     deploy:
       resources:
         limits:

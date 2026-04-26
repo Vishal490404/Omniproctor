@@ -14,22 +14,24 @@ distro works.
 | Size             | `Standard_B2s` (2 vCPU / 4 GB RAM) for ≤ ~50 students. Bump to `Standard_D2s_v5` for larger cohorts. |
 | Disk             | 64 GB Premium SSD                                      |
 | Auth             | SSH public key                                         |
-| Inbound ports    | SSH (22), HTTP (80), HTTPS (443), and **8001** (kiosk → API) |
+| Inbound ports    | SSH (22), HTTP (80), HTTPS (443) — Caddy fronts everything |
 | Public IP        | Static, with a DNS name (`omniproctor.example.com`)    |
 
 Open the right NSG rules from the portal, or via CLI:
 
 ```bash
-az network nsg rule create -g <rg> --nsg-name <nsg> --name HTTP    --priority 1001 --access Allow --protocol Tcp --destination-port-ranges 80
-az network nsg rule create -g <rg> --nsg-name <nsg> --name HTTPS   --priority 1002 --access Allow --protocol Tcp --destination-port-ranges 443
-az network nsg rule create -g <rg> --nsg-name <nsg> --name KioskAPI --priority 1003 --access Allow --protocol Tcp --destination-port-ranges 8001
+az network nsg rule create -g <rg> --nsg-name <nsg> --name HTTP  --priority 1001 --access Allow --protocol Tcp --destination-port-ranges 80
+az network nsg rule create -g <rg> --nsg-name <nsg> --name HTTPS --priority 1002 --access Allow --protocol Tcp --destination-port-ranges 443
 ```
 
-> **Why expose 8001?** The kiosk (running on the student's PC) talks to the
-> FastAPI backend directly using the `apiBase` baked into the
-> `omniproctor-browser://` launch link. If you put the API behind a reverse
-> proxy on 443, set `API_BASE_URL=https://omniproctor.example.com/api/v1`
-> instead and skip rule 1003.
+> **Single ingress.** Caddy (configured in step 5) is the only public-facing
+> service. It auto-provisions a Let's Encrypt cert for the DNS name, then
+> reverse-proxies `/api/*` to the FastAPI backend and everything else to
+> the SPA container — both bound to docker-internal addresses only. The
+> kiosk on each student's PC talks to `https://omniproctor.example.com/api/v1`
+> directly; the embedded process firewall allows it because the kiosk's own
+> processes are whitelisted (the rule is process-based, not destination-
+> based, so any outbound HTTPS works).
 
 ---
 
@@ -167,29 +169,110 @@ Update `.env` so `API_BASE_URL=https://omniproctor.example.com/api/v1` and
 
 ---
 
-## 7. Drop in the kiosk installer
+## 7. Publish the kiosk installer
 
-After running PyInstaller + Inno Setup (see `Browser/OmniProctorBrowser.iss`),
-copy `OmniProctorSetup-<version>.exe` to the VM as
-`WebClient/installers/OmniProctorKioskSetup.exe` (note the *renamed* file).
-Students will then download it from the dashboard (which calls
-`GET /api/v1/downloads/installer/windows`).
+Two delivery modes are supported. **GitHub Releases is recommended** for any
+Internet-reachable deployment.
+
+### Option A: Host on GitHub Releases (recommended)
+
+1. Build the EXE locally as documented in
+   [`Browser/OmniProctorBrowser.iss`](../Browser/OmniProctorBrowser.iss).
+2. Create a release in your GitHub repo (`Releases → Draft a new release`),
+   tag it `v0.1.0`, and attach `OmniProctorSetup-0.1.0.exe`.
+3. Capture the asset URL. Either pin it to a version:
+
+   ```
+   https://github.com/<org>/<repo>/releases/download/v0.1.0/OmniProctorSetup-0.1.0.exe
+   ```
+
+   …or use the always-latest alias so you never have to touch `.env` again:
+
+   ```
+   https://github.com/<org>/<repo>/releases/latest/download/OmniProctorSetup-0.1.0.exe
+   ```
+
+4. Set in `WebClient/.env` on the VM:
+
+   ```ini
+   INSTALLER_WINDOWS_URL=https://github.com/<org>/<repo>/releases/download/v0.1.0/OmniProctorSetup-0.1.0.exe
+   INSTALLER_WINDOWS_VERSION=0.1.0
+   INSTALLER_WINDOWS_FILENAME=OmniProctorSetup-0.1.0.exe
+   # Optional - copy from the GitHub Releases page so the dashboard shows it
+   INSTALLER_WINDOWS_SHA256=<the 64-hex-char digest>
+   INSTALLER_WINDOWS_SIZE_BYTES=<bytes>
+   ```
+
+5. Restart the API to pick up the env change:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml restart webclient-api
+   ```
+
+The `Downloads` page now shows a "Download from GitHub" button that opens the
+release asset directly. The `/api/v1/downloads/installer/windows` endpoint
+keeps working too — it 307-redirects to the GitHub URL — so anything that
+relied on the old auth-streamed download (curl / wget scripts, etc.) keeps
+working.
+
+To publish a new build, just upload a new asset and bump
+`INSTALLER_WINDOWS_URL` + `INSTALLER_WINDOWS_VERSION`. No image rebuild
+needed; one `docker compose restart webclient-api` is enough.
+
+### Option B: Bundle a local file (dev / air-gapped)
+
+For dev or fully offline networks, drop the EXE into the bind-mounted
+installers directory and leave `INSTALLER_WINDOWS_URL` empty:
 
 ```bash
-scp OmniProctorSetup-0.1.0.exe azureuser@<vm>:/opt/Omniproctor/WebClient/installers/OmniProctorKioskSetup.exe
+scp OmniProctorSetup-0.1.0.exe \
+    azureuser@<vm>:/opt/Omniproctor/WebClient/installers/OmniProctorKioskSetup.exe
 ```
 
-No restart needed - the directory is bind-mounted read-only into the API
-container.
+No restart needed — the directory is bind-mounted read-only and the API
+streams the file with auth. The SHA-256 is computed once and cached.
 
 ---
 
-## 8. Troubleshooting
+## 8. Quick verification of the Caddy + kiosk pipeline
+
+After step 5 (Caddy live) and step 7 (installer published), confirm the
+end-to-end flow works:
+
+```bash
+# 1. SPA loads + correct API URL injected
+curl -fsS https://omniproctor.example.com/healthz
+curl -fsS https://omniproctor.example.com/config.js | grep API_BASE_URL
+
+# 2. API reachable through Caddy (with TLS)
+curl -fsS https://omniproctor.example.com/api/v1/health
+
+# 3. Installer link points where you expect
+curl -fsS -H "Authorization: Bearer <a-test-token>" \
+    https://omniproctor.example.com/api/v1/downloads/manifest | jq .
+
+# 4. End-to-end: log in as a student in a browser, click "Download from
+#    GitHub" on the Downloads page, run the installer, then click "Open
+#    in kiosk browser" on a test. The kiosk should launch, hit
+#    https://omniproctor.example.com/api/v1/... directly, and start
+#    streaming telemetry which appears in the teacher's Live Monitoring.
+```
+
+The kiosk needs no code changes for HTTPS — `urllib.request` validates
+Caddy's Let's Encrypt cert against the Windows trust store, and the
+process-based firewall whitelists outbound traffic from the kiosk's own
+processes regardless of destination host.
+
+---
+
+## 9. Troubleshooting
 
 | Symptom                                                     | Cause / fix                                                                                  |
 | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | Frontend loads, but every API call is `Network Error`       | `/config.js` returned an empty `API_BASE_URL`. Check `.env` and `docker compose logs webclient-frontend`. |
-| Kiosk launches but never sends telemetry                    | The embedded `apiBase` in the launch link is unreachable from the student's PC. Confirm port 8001 is open in the NSG, or move to HTTPS via Caddy. |
+| Kiosk launches but never sends telemetry                    | The embedded `apiBase` in the launch link is unreachable from the student's PC. Confirm port 443 is open and the Caddy cert is valid (`curl -v https://omniproctor.example.com/api/v1/health`). |
 | `POSTGRES_PASSWORD must be set in .env`                     | You skipped step 3. Edit `.env` and re-run the `up -d` command.                              |
 | `502 Bad Gateway` from Caddy after rotating images          | One service is still rebuilding. `docker compose ps` will show its health.                   |
 | Disk filling up                                             | Container logs - the prod compose caps each at 50 MB. Old image layers: `docker system prune -af`. |
+| Downloads page shows "Not yet uploaded"                     | Both delivery modes are unconfigured. Set `INSTALLER_WINDOWS_URL` in `.env` (Option A) or drop the EXE into `installers/` (Option B), then `docker compose restart webclient-api`. |
+| Download button on dashboard does nothing                   | Browser pop-up blocker rejected `window.open`. The dashboard prints a notification — students can right-click → "Open in new tab" on the same button. |
