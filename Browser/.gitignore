@@ -6,7 +6,7 @@ wheels/
 *.egg-info
 
 # PyInstaller / Inno Setup outputs (keep the build sources tracked)
-build/Output/
+Output/
 build/*.manifest
 build/*.toc
 build/*.pkg

@@ -60,8 +60,8 @@ LZMAUseSeparateProcess=yes
 
 ; Always elevate; the kiosk needs admin for firewall + global hotkeys.
 PrivilegesRequired=admin
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 
 WizardStyle=modern
 SetupIconFile=browser\assets\icon.ico
