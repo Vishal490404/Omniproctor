@@ -50,23 +50,13 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { behaviorApi, liveApi, testsApi } from '../api/services'
-import { formatDateIST } from '../utils/time'
+import { formatDateIST, relativeTime } from '../utils/time'
 import { WarningComposerModal } from './WarningComposerModal'
 
 const POLL_INTERVAL_MS = 3000
 const RISK_ALERT_THRESHOLD = 50
 const RISK_ALERT_COOLDOWN_MS = 60_000
 
-function relativeTime(iso) {
-  if (!iso) return '—'
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return '—'
-  const delta = Math.max(0, Date.now() - then)
-  if (delta < 5_000) return 'just now'
-  if (delta < 60_000) return `${Math.floor(delta / 1000)}s ago`
-  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`
-  return `${Math.floor(delta / 3_600_000)}h ago`
-}
 
 function riskBandColor(band) {
   if (band === 'critical') return 'red'
@@ -89,9 +79,9 @@ function severityColor(sev) {
 }
 
 function focusBadge(state) {
-  if (state === 'in_focus') return { color: 'teal', label: 'Focused', icon: <IconEye size={12} /> }
+  if (state === 'in_focus') return { color: 'teal', label: 'Focused', icon: <IconEye size={12} stroke={2} /> }
   if (state === 'out_of_focus')
-    return { color: 'red', label: 'Lost focus', icon: <IconEyeOff size={12} /> }
+    return { color: 'red', label: 'Lost focus', icon: <IconEyeOff size={12} stroke={2} /> }
   return { color: 'gray', label: 'Unknown', icon: null }
 }
 
@@ -671,7 +661,7 @@ export function LiveMonitoringPage() {
                       </Badge>
                       <Badge
                         color={focusBadge(drawerAttempt.focus_state).color}
-                        variant="dot"
+                        variant="light"
                         leftSection={focusBadge(drawerAttempt.focus_state).icon}
                       >
                         {focusBadge(drawerAttempt.focus_state).label}
@@ -700,7 +690,7 @@ export function LiveMonitoringPage() {
                     size="xs"
                     onClick={() =>
                       openComposer(
-                        `We've noticed unusual activity (risk ${drawerAttempt.risk_score}). Please stay focused on the exam.`,
+                        `We've noticed unusual activity. Please stay focused on the exam.`,
                       )
                     }
                   >
@@ -923,7 +913,7 @@ function TableView({ rows, onSelect, onWarn }) {
                   )}
                 </Table.Td>
                 <Table.Td>
-                  <Badge color={focus.color} variant="dot" leftSection={focus.icon}>
+                  <Badge color={focus.color} variant="light" leftSection={focus.icon}>
                     {focus.label}
                   </Badge>
                 </Table.Td>
@@ -971,7 +961,7 @@ function TableView({ rows, onSelect, onWarn }) {
                         onWarn(
                           row,
                           row.risk_band === 'critical'
-                            ? `We've noticed unusual activity (risk ${row.risk_score}). Please stay focused on the exam.`
+                            ? `We've noticed unusual activity. Please stay focused on the exam.`
                             : '',
                         )
                       }}

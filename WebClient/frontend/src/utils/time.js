@@ -17,6 +17,25 @@ export function formatDateIST(value) {
   return `${IST_FORMATTER.format(date)} IST`
 }
 
+/**
+ * Short, human-friendly elapsed time. Returns "just now", "Ns ago",
+ * "Nm ago" or "Nh ago". Used by the live monitoring dashboard and the
+ * warning composer history list, where absolute timestamps add noise.
+ */
+export function relativeTime(value) {
+  if (!value) return '—'
+
+  const then = new Date(value).getTime()
+  if (Number.isNaN(then)) return '—'
+
+  const delta = Math.max(0, Date.now() - then)
+  if (delta < 5_000) return 'just now'
+  if (delta < 60_000) return `${Math.floor(delta / 1000)}s ago`
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`
+  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`
+  return `${Math.floor(delta / 86_400_000)}d ago`
+}
+
 export function toUtcIsoFromLocalDateTime(value) {
   if (!value) return ''
 

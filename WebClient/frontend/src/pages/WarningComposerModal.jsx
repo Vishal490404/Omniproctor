@@ -8,12 +8,13 @@ import {
   Table,
   Text,
   Textarea,
+  Tooltip,
 } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import { useEffect, useState } from 'react'
 
 import { warningsApi } from '../api/services'
-import { formatDateIST } from '../utils/time'
+import { formatDateIST, relativeTime } from '../utils/time'
 
 function severityColor(sev) {
   if (sev === 'critical') return 'red'
@@ -142,14 +143,26 @@ export function WarningComposerModal({ opened, attempt, seedMessage = '', onClos
                   .reverse()
                   .map((warning) => (
                     <Table.Tr key={warning.id}>
-                      <Table.Td>{formatDateIST(warning.created_at)}</Table.Td>
+                      <Table.Td>
+                        <Tooltip label={formatDateIST(warning.created_at)} withArrow>
+                          <Text size="sm">{relativeTime(warning.created_at)}</Text>
+                        </Tooltip>
+                      </Table.Td>
                       <Table.Td>
                         <Badge color={severityColor(warning.severity)} variant="light">
                           {warning.severity}
                         </Badge>
                       </Table.Td>
                       <Table.Td style={{ maxWidth: 320 }}>{warning.message}</Table.Td>
-                      <Table.Td>{warning.acknowledged_at ? '✓' : '—'}</Table.Td>
+                      <Table.Td>
+                        {warning.acknowledged_at ? (
+                          <Tooltip label={formatDateIST(warning.acknowledged_at)} withArrow>
+                            <Text size="sm">✓ {relativeTime(warning.acknowledged_at)}</Text>
+                          </Tooltip>
+                        ) : (
+                          '—'
+                        )}
+                      </Table.Td>
                     </Table.Tr>
                   ))}
               </Table.Tbody>
