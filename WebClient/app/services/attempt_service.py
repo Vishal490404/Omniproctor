@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import func
+from sqlalchemy import func, not_, or_
 from sqlalchemy.orm import Session
 
 from app.models.assignment import TestAssignment
@@ -9,6 +9,36 @@ from app.models.test import Test
 from app.models.test_attempt import AttemptStatus, TestAttempt
 from app.models.user import User
 from app.schemas.attempt import AttemptSummaryResponse
+
+# Reasons that mark an ENDED attempt as something the system closed on
+# the candidate's behalf rather than a real attempt the candidate spent.
+# These are excluded from ``attempts_used`` so an installer / network /
+# kiosk-crash glitch can't burn a candidate's allowance of tries.
+#
+# - ``auto_closed_stale_after_*`` is set by ``_close_stale_attempt`` when
+#   the kiosk goes idle for >120 s and we recycle its IN_PROGRESS row.
+# - ``orphan_*`` is set when ``end_attempt`` is called with no live
+#   IN_PROGRESS row and we synthesise an ENDED row purely for audit.
+_NON_COUNTING_REASON_PREFIXES = ("auto_closed_stale_", "orphan_")
+
+
+def _attempts_used_filter():
+    """SQLAlchemy expression matching attempts that should count towards
+    ``attempts_used``. A row counts iff it is ENDED AND its
+    ``ended_reason`` is null (real End Session) or doesn't start with any
+    non-counting prefix.
+    """
+    return (TestAttempt.status == AttemptStatus.ENDED) & or_(
+        TestAttempt.ended_reason.is_(None),
+        not_(
+            or_(
+                *(
+                    TestAttempt.ended_reason.like(f"{prefix}%")
+                    for prefix in _NON_COUNTING_REASON_PREFIXES
+                )
+            )
+        ),
+    )
 
 
 def _build_summary(test: Test, student_id: int, attempts_used: int) -> AttemptSummaryResponse:
@@ -29,7 +59,7 @@ def get_attempts_used(db: Session, test_id: int, student_id: int) -> int:
         .filter(
             TestAttempt.test_id == test_id,
             TestAttempt.student_id == student_id,
-            TestAttempt.status == AttemptStatus.ENDED,
+            _attempts_used_filter(),
         )
         .scalar()
         or 0
@@ -50,7 +80,7 @@ def get_attempt_summary_map(db: Session, test: Test, student_ids: list[int]) -> 
         .filter(
             TestAttempt.test_id == test.id,
             TestAttempt.student_id.in_(student_ids),
-            TestAttempt.status == AttemptStatus.ENDED,
+            _attempts_used_filter(),
         )
         .group_by(TestAttempt.student_id)
         .all()
@@ -190,6 +220,13 @@ def end_attempt(db: Session, test: Test, student: User, reason: str | None = Non
     if not summary.can_attempt:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Attempt limit reached")
 
+    # Audit-only row. The candidate has no live IN_PROGRESS attempt, so
+    # nothing real is being ended - we record the End Session signal for
+    # forensics but mark it ``orphan_*`` so it does NOT count against
+    # ``attempts_used``. Otherwise a stray "End" ping (kiosk crash on
+    # launch, double-click on the close button, etc.) would silently
+    # burn one of the candidate's tries.
+    orphan_reason = f"orphan_{reason}" if reason else "orphan_no_active_attempt"
     attempt = TestAttempt(
         test_id=test.id,
         student_id=student.id,
@@ -197,7 +234,7 @@ def end_attempt(db: Session, test: Test, student: User, reason: str | None = Non
         status=AttemptStatus.ENDED,
         started_at=now,
         ended_at=now,
-        ended_reason=reason,
+        ended_reason=orphan_reason,
     )
     db.add(attempt)
     db.commit()

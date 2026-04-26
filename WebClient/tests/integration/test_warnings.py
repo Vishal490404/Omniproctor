@@ -82,9 +82,13 @@ def test_send_warning_validates_message_length(
 # ---------------------------------------------------------------------------
 # List (GET /attempts/{id}/warnings)
 # ---------------------------------------------------------------------------
-def test_owning_student_can_list_their_warnings(
+def test_owning_student_jwt_can_list_their_warnings(
     client, teacher_token, student_token, assigned_attempt
 ):
+    """The WebClient student dashboard (using the user JWT) can read its
+    own warnings - polymorphic auth on this endpoint still accepts the
+    student token, even though the kiosk uses its capability token.
+    """
     sent = client.post(
         _send_url(assigned_attempt.id),
         headers=auth_header(teacher_token),
@@ -100,6 +104,42 @@ def test_owning_student_can_list_their_warnings(
     rows = listing.json()
     assert len(rows) == 1
     assert rows[0]["message"] == "Warning 1"
+
+
+def test_kiosk_token_can_list_warnings(
+    client, teacher_token, kiosk_token, assigned_attempt
+):
+    """Kiosk poll path - capability token, exam-window TTL."""
+    sent = client.post(
+        _send_url(assigned_attempt.id),
+        headers=auth_header(teacher_token),
+        json={"message": "Eyes up", "severity": "warn"},
+    )
+    assert sent.status_code == 200
+
+    listing = client.get(
+        _list_url(assigned_attempt.id),
+        headers=auth_header(kiosk_token),
+    )
+    assert listing.status_code == 200
+    rows = listing.json()
+    assert [r["message"] for r in rows] == ["Eyes up"]
+
+
+def test_kiosk_token_cannot_list_other_attempt_warnings(
+    client, teacher_token, kiosk_token, other_attempt
+):
+    """Kiosk token bound to attempt A cannot peek at attempt B's warnings."""
+    client.post(
+        _send_url(other_attempt.id),
+        headers=auth_header(teacher_token),
+        json={"message": "for B only", "severity": "warn"},
+    )
+    response = client.get(
+        _list_url(other_attempt.id),
+        headers=auth_header(kiosk_token),
+    )
+    assert response.status_code == 403
 
 
 def test_other_student_cannot_list_warnings(
@@ -118,7 +158,7 @@ def test_other_student_cannot_list_warnings(
 
 
 def test_since_id_filters_results(
-    client, teacher_token, student_token, assigned_attempt
+    client, teacher_token, kiosk_token, assigned_attempt
 ):
     first = client.post(
         _send_url(assigned_attempt.id),
@@ -133,7 +173,7 @@ def test_since_id_filters_results(
 
     response = client.get(
         _list_url(assigned_attempt.id, since_id=first["id"]),
-        headers=auth_header(student_token),
+        headers=auth_header(kiosk_token),
     )
     assert response.status_code == 200
     rows = response.json()
@@ -141,10 +181,10 @@ def test_since_id_filters_results(
 
 
 # ---------------------------------------------------------------------------
-# Ack (POST /warnings/{id}/ack)
+# Ack (POST /warnings/{id}/ack) - kiosk-only endpoint
 # ---------------------------------------------------------------------------
-def test_owning_student_can_ack_warning(
-    client, teacher_token, student_token, assigned_attempt
+def test_kiosk_token_can_ack_warning(
+    client, teacher_token, kiosk_token, assigned_attempt
 ):
     sent = client.post(
         _send_url(assigned_attempt.id),
@@ -154,7 +194,7 @@ def test_owning_student_can_ack_warning(
 
     response = client.post(
         _ack_url(sent["id"]),
-        headers=auth_header(student_token),
+        headers=auth_header(kiosk_token),
         json={},
     )
     assert response.status_code == 200
@@ -163,27 +203,48 @@ def test_owning_student_can_ack_warning(
     assert body["delivered_at"] is not None
 
 
-def test_other_student_cannot_ack_warning(
-    client, teacher_token, other_student_token, assigned_attempt
+def test_kiosk_token_cannot_ack_other_attempt_warning(
+    client, teacher_token, kiosk_token, other_attempt
 ):
+    """Kiosk token bound to attempt A must not be able to ack a warning
+    on attempt B (even though the warning row exists)."""
     sent = client.post(
-        _send_url(assigned_attempt.id),
+        _send_url(other_attempt.id),
         headers=auth_header(teacher_token),
         json={"message": "private ack", "severity": "warn"},
     ).json()
 
     response = client.post(
         _ack_url(sent["id"]),
-        headers=auth_header(other_student_token),
+        headers=auth_header(kiosk_token),
         json={},
     )
     assert response.status_code == 403
 
 
-def test_teacher_cannot_ack_warning(
+def test_student_jwt_cannot_ack_warning(
+    client, teacher_token, student_token, assigned_attempt
+):
+    """Plain student JWT is no longer accepted on the ack endpoint -
+    only kiosk capability tokens. (The student JWT is a 401 now, not
+    a 403, because it isn't a kiosk-audience token at all.)"""
+    sent = client.post(
+        _send_url(assigned_attempt.id),
+        headers=auth_header(teacher_token),
+        json={"message": "x", "severity": "warn"},
+    ).json()
+    response = client.post(
+        _ack_url(sent["id"]),
+        headers=auth_header(student_token),
+        json={},
+    )
+    assert response.status_code == 401
+
+
+def test_teacher_jwt_cannot_ack_warning(
     client, teacher_token, assigned_attempt
 ):
-    """Ack is a kiosk/student concern - staff should not be able to fake it."""
+    """Staff also locked out of ack - it's a kiosk-only operation."""
     sent = client.post(
         _send_url(assigned_attempt.id),
         headers=auth_header(teacher_token),
@@ -194,4 +255,4 @@ def test_teacher_cannot_ack_warning(
         headers=auth_header(teacher_token),
         json={},
     )
-    assert response.status_code == 403
+    assert response.status_code == 401

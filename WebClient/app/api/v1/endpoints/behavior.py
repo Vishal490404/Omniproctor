@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.api.deps import AdminTeacherProctor, CurrentUser, DBSession, StudentOnly
+from app.api.deps import AdminTeacherProctor, CurrentUser, DBSession, KioskAttempt
 from app.models.user import UserRole
 from app.schemas.behavior import (
     MAX_BATCH_SIZE,
@@ -31,15 +31,24 @@ def ingest_behavior_event(
     attempt_id: int,
     payload: BehaviorEventCreateRequest,
     db: DBSession,
-    current_user: StudentOnly,
+    kiosk_attempt: KioskAttempt,
 ):
-    attempt = get_attempt_or_404(db, attempt_id)
-    if attempt.student_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot log event for another student")
+    """Kiosk → single event ingest.
+
+    Auth uses the kiosk capability token (NOT the student JWT). The
+    token is bound to a specific attempt at issue time; we cross-check
+    it against the URL's ``attempt_id`` so a token for attempt A cannot
+    be used to write events to attempt B.
+    """
+    if kiosk_attempt.id != attempt_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Kiosk token does not match attempt",
+        )
 
     return create_behavior_event(
         db,
-        attempt,
+        kiosk_attempt,
         payload.event_type,
         payload.payload,
         payload.severity,
@@ -55,9 +64,12 @@ def ingest_behavior_events_batch(
     attempt_id: int,
     payload: BehaviorEventBatchRequest,
     db: DBSession,
-    current_user: StudentOnly,
+    kiosk_attempt: KioskAttempt,
 ):
     """Bulk ingestion path used by the kiosk's BatchPoster.
+
+    Auth uses the kiosk capability token; see the single-event endpoint
+    above for the rationale.
 
     Capped at ``MAX_BATCH_SIZE`` events per call (enforced here, not at
     schema time, so we can return a clean 413 instead of a 422). Each
@@ -68,11 +80,10 @@ def ingest_behavior_events_batch(
     Returns the latest warning id known for the attempt so the kiosk can
     dedup its warning poll without an extra round-trip.
     """
-    attempt = get_attempt_or_404(db, attempt_id)
-    if attempt.student_id != current_user.id:
+    if kiosk_attempt.id != attempt_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot log events for another student",
+            detail="Kiosk token does not match attempt",
         )
 
     raw_events = payload.events or []
@@ -96,7 +107,7 @@ def ingest_behavior_events_batch(
                 raw,
             )
 
-    accepted = create_behavior_events_bulk(db, attempt, valid) if valid else 0
+    accepted = create_behavior_events_bulk(db, kiosk_attempt, valid) if valid else 0
 
     return BehaviorEventBatchResponse(
         accepted=accepted,
@@ -107,6 +118,10 @@ def ingest_behavior_events_batch(
 
 @router.get("/attempts/{attempt_id}/events", response_model=list[BehaviorEventResponse])
 def get_attempt_events(attempt_id: int, db: DBSession, current_user: CurrentUser):
+    """Read path - used by the live monitor / behavior logs UI in the
+    WebClient. Auth is the standard user JWT; the kiosk does not need
+    to GET its own events.
+    """
     attempt = get_attempt_or_404(db, attempt_id)
 
     if current_user.role == UserRole.STUDENT and attempt.student_id != current_user.id:

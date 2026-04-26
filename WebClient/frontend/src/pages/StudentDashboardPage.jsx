@@ -36,7 +36,22 @@ export function StudentDashboardPage() {
       const { data: startResponse } = await attemptsApi.start(item.id)
       const attemptId = startResponse?.attempt?.id
       const studentId = startResponse?.attempt?.student_id
-      const token = localStorage.getItem('wc_token') || ''
+      // IMPORTANT: this is the KIOSK CAPABILITY TOKEN, not the student's
+      // WebClient JWT. It's signed with a kiosk-only secret, scoped to
+      // this single attempt, and lives until test.end_time + grace - so
+      // telemetry / End Session keep working even if the candidate's
+      // login expires mid-exam. Falling back to the WebClient JWT would
+      // re-introduce that bug, so we deliberately don't.
+      const kioskToken = startResponse?.kiosk_token || ''
+      if (!kioskToken) {
+        notifications.show({
+          color: 'red',
+          title: 'Cannot launch kiosk',
+          message:
+            'Server did not return a kiosk token. Update the WebClient backend.',
+        })
+        return
+      }
       // IMPORTANT: derive apiBase from the same source the React app uses
       // (apiClient.defaults.baseURL). Falling back to window.location.origin
       // would point the kiosk at the Vite dev server (5174) instead of the
@@ -49,7 +64,7 @@ export function StudentDashboardPage() {
       const launchUrl = buildKioskLaunchUrl(item.external_link, {
         apiBase,
         attemptId,
-        token,
+        token: kioskToken,
         testId: item.id,
         studentId,
       })
@@ -131,7 +146,7 @@ export function StudentDashboardPage() {
                 Window: {formatDateIST(item.start_time)} - {formatDateIST(item.end_time)}
               </Text>
               <Text size="sm" c="dimmed">
-                Attempts: {item.attempts_used}/{item.max_attempts} used
+                Attempts used: {item.attempts_used} of {item.max_attempts}
               </Text>
               <Group justify="space-between" align="center" mt={2}>
                 <Badge color={item.is_active ? 'teal' : 'gray'}>{item.is_active ? 'Active' : 'Inactive'}</Badge>

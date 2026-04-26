@@ -1,4 +1,11 @@
-"""Tests for the bulk telemetry ingestion endpoint."""
+"""Tests for the bulk telemetry ingestion endpoint.
+
+Auth model: the kiosk POSTs telemetry using a per-attempt capability
+token issued at attempt-start time, NOT the student's WebClient JWT.
+The token is bound to a single ``test_attempts.id``, so a token for
+attempt A must not be usable to write events to attempt B - and a
+plain student JWT must not work either.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +31,10 @@ def _sample_event(event_type: str = "FOCUS_LOSS", severity: str = "warn") -> dic
     }
 
 
-def test_owning_student_can_post_batch(client, student_token, assigned_attempt):
+def test_kiosk_token_can_post_batch(client, kiosk_token, assigned_attempt):
     response = client.post(
         _batch_url(assigned_attempt.id),
-        headers=auth_header(student_token),
+        headers=auth_header(kiosk_token),
         json={
             "events": [
                 _sample_event("FOCUS_LOSS"),
@@ -41,14 +48,13 @@ def test_owning_student_can_post_batch(client, student_token, assigned_attempt):
     body = response.json()
     assert body["accepted"] == 3
     assert body["rejected"] == 0
-    # No warnings exist yet for this attempt.
     assert body["latest_warning_id"] in (None, 0)
 
 
-def test_empty_batch_is_accepted_as_noop(client, student_token, assigned_attempt):
+def test_empty_batch_is_accepted_as_noop(client, kiosk_token, assigned_attempt):
     response = client.post(
         _batch_url(assigned_attempt.id),
-        headers=auth_header(student_token),
+        headers=auth_header(kiosk_token),
         json={"events": []},
     )
     assert response.status_code == 200
@@ -58,46 +64,62 @@ def test_empty_batch_is_accepted_as_noop(client, student_token, assigned_attempt
 
 
 def test_batch_over_cap_is_rejected_by_validator(
-    client, student_token, assigned_attempt
+    client, kiosk_token, assigned_attempt
 ):
     big = [_sample_event("FOCUS_LOSS") for _ in range(MAX_BATCH_SIZE + 1)]
     response = client.post(
         _batch_url(assigned_attempt.id),
-        headers=auth_header(student_token),
+        headers=auth_header(kiosk_token),
         json={"events": big},
     )
     assert response.status_code == 422
 
 
-def test_other_student_cannot_post_batch(
-    client, other_student_token, assigned_attempt
+def test_kiosk_token_cannot_post_to_other_attempt(
+    client, kiosk_token, other_attempt
 ):
+    """A token bound to attempt A must not write to attempt B."""
     response = client.post(
-        _batch_url(assigned_attempt.id),
-        headers=auth_header(other_student_token),
+        _batch_url(other_attempt.id),
+        headers=auth_header(kiosk_token),
         json={"events": [_sample_event()]},
     )
     assert response.status_code == 403
 
 
-def test_teacher_cannot_post_batch_as_student(
+def test_student_jwt_cannot_post_batch(
+    client, student_token, assigned_attempt
+):
+    """The plain student JWT is no longer accepted on kiosk endpoints -
+    callers must use the kiosk capability token. This is the whole
+    point of the new auth model: short-lived student sessions don't
+    have to keep working past the WebClient login expiry.
+    """
+    response = client.post(
+        _batch_url(assigned_attempt.id),
+        headers=auth_header(student_token),
+        json={"events": [_sample_event()]},
+    )
+    assert response.status_code == 401
+
+
+def test_teacher_jwt_cannot_post_batch(
     client, teacher_token, assigned_attempt
 ):
-    """The batch endpoint is gated by ``StudentOnly`` - non-students get 403."""
     response = client.post(
         _batch_url(assigned_attempt.id),
         headers=auth_header(teacher_token),
         json={"events": [_sample_event()]},
     )
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 def test_unknown_severity_is_normalized_to_info(
-    client, student_token, assigned_attempt
+    client, kiosk_token, assigned_attempt
 ):
     response = client.post(
         _batch_url(assigned_attempt.id),
-        headers=auth_header(student_token),
+        headers=auth_header(kiosk_token),
         json={
             "events": [
                 {
@@ -114,11 +136,11 @@ def test_unknown_severity_is_normalized_to_info(
 
 def test_batch_endpoint_returns_latest_warning_id(
     client,
-    student_token,
+    kiosk_token,
     teacher_token,
     assigned_attempt,
 ):
-    # Teacher sends a warning first.
+    # Teacher sends a warning first (uses staff JWT - unchanged).
     send = client.post(
         f"/api/v1/proctor/attempts/{assigned_attempt.id}/warnings",
         headers=auth_header(teacher_token),
@@ -127,10 +149,11 @@ def test_batch_endpoint_returns_latest_warning_id(
     assert send.status_code == 200
     warning_id = send.json()["id"]
 
-    # Then the kiosk pushes a batch and expects to see the warning id back.
+    # Kiosk pushes a batch with its capability token and gets the
+    # latest_warning_id back so the warning poller can advance.
     resp = client.post(
         _batch_url(assigned_attempt.id),
-        headers=auth_header(student_token),
+        headers=auth_header(kiosk_token),
         json={"events": [_sample_event()]},
     )
     assert resp.status_code == 200

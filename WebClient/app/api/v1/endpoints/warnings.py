@@ -5,7 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy.orm import joinedload
 
-from app.api.deps import AdminTeacherProctor, CurrentUser, DBSession, StudentOnly
+from app.api.deps import (
+    AdminTeacherProctor,
+    DBSession,
+    KioskAttempt,
+    WarningReaderDep,
+)
 from app.models.proctor_warning import ProctorWarning
 from app.models.user import UserRole
 from app.schemas.warning import (
@@ -19,7 +24,7 @@ from app.services.warning_service import (
     acknowledge_warning,
     create_warning,
     get_warning_or_404,
-    list_warnings_for_attempt,
+    list_warnings_for_attempt,  # noqa: F401  - kept for downstream import compatibility
 )
 
 router = APIRouter()
@@ -63,39 +68,53 @@ def send_warning(
 def list_warnings(
     attempt_id: int,
     db: DBSession,
-    current_user: CurrentUser,
+    reader: WarningReaderDep,
     since_id: int = Query(0, ge=0, description="Return only warnings with id > since_id"),
     include_acknowledged: bool | None = Query(
         None,
         description=(
             "If False, omit warnings the candidate already acked. "
-            "Defaults to False for student callers (so a stale kiosk relaunch "
+            "Defaults to False for kiosk/student callers (so a stale kiosk relaunch "
             "doesn't replay old warnings) and True for staff (so the dashboard "
             "still shows a full audit trail)."
         ),
     ),
 ):
-    """Both the candidate (kiosk short-poll) and staff can read this list.
+    """Polled by both the kiosk (capability token) and staff (user JWT).
 
-    The student is only allowed to see their own warnings; staff can see any
+    The kiosk is bound to a single attempt by its token, so we just
+    confirm the path attempt_id matches. Students viewing in the
+    WebClient may only see their own warnings; staff can see any
     attempt for tests they manage (or any test if admin/proctor).
     """
     attempt = get_attempt_or_404(db, attempt_id)
 
-    is_student_call = current_user.role == UserRole.STUDENT
-    if is_student_call:
-        if attempt.student_id != current_user.id:
+    if reader.is_kiosk:
+        if reader.attempt is None or reader.attempt.id != attempt_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot view another student's warnings",
+                detail="Kiosk token does not match attempt",
             )
+        kiosk_call = True
     else:
-        test = get_test_or_404(db, attempt.test_id)
-        if current_user.role in {UserRole.ADMIN, UserRole.TEACHER}:
-            ensure_manage_permission(test, current_user)
+        user = reader.user
+        assert user is not None  # excluded by get_warning_reader
+        if user.role == UserRole.STUDENT:
+            if attempt.student_id != user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cannot view another student's warnings",
+                )
+        else:
+            test = get_test_or_404(db, attempt.test_id)
+            if user.role in {UserRole.ADMIN, UserRole.TEACHER}:
+                ensure_manage_permission(test, user)
+        kiosk_call = user.role == UserRole.STUDENT
 
     if include_acknowledged is None:
-        include_acknowledged = not is_student_call
+        # Default: kiosk/student callers see only un-acked (so a relaunch
+        # doesn't replay), staff see everything.
+        include_acknowledged = not kiosk_call
 
     rows = (
         db.query(ProctorWarning)
@@ -115,15 +134,19 @@ def ack_warning(
     warning_id: int,
     payload: ProctorWarningAckRequest,
     db: DBSession,
-    current_user: StudentOnly,
+    kiosk_attempt: KioskAttempt,
 ):
-    """The kiosk acks delivery so the teacher dashboard shows a green check."""
+    """The kiosk acks delivery so the teacher dashboard shows a green check.
+
+    Auth uses the kiosk capability token; we cross-check the warning's
+    attempt_id against the token so a kiosk can only ack its own
+    attempt's warnings.
+    """
     warning = get_warning_or_404(db, warning_id)
-    attempt = get_attempt_or_404(db, warning.attempt_id)
-    if attempt.student_id != current_user.id:
+    if warning.attempt_id != kiosk_attempt.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot acknowledge another student's warning",
+            detail="Kiosk token does not match warning's attempt",
         )
 
     warning = acknowledge_warning(db, warning, payload.delivered_at)

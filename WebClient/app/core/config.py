@@ -12,6 +12,21 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
 
+    # Kiosk capability tokens -------------------------------------------
+    # The kiosk receives a separate JWT (audience="kiosk") at attempt-
+    # start time; it has no relation to the student's WebClient session.
+    # Lifetime is tied to the test's end_time + this many minutes of
+    # grace, so a slow finisher / late End Session POST still gets
+    # through after the student token would have expired.
+    #
+    # ``kiosk_token_secret`` defaults to a derived value from
+    # ``secret_key`` so a separate env var is not required to get going,
+    # but it MUST be different from secret_key (otherwise a kiosk token
+    # could in theory be replayed as a user JWT). When set explicitly
+    # (e.g. in production), use a long random string.
+    kiosk_token_secret: str | None = None
+    kiosk_token_grace_minutes: int = 120
+
     cors_origins: list[str] = ["*"]
 
     # Kiosk-browser installer distribution -------------------------------

@@ -23,6 +23,7 @@ from app.models.assignment import TestAssignment  # noqa: E402
 from app.models.test import Test  # noqa: E402
 from app.models.test_attempt import AttemptStatus, TestAttempt  # noqa: E402
 from app.models.user import User, UserRole  # noqa: E402
+from app.services.kiosk_token_service import issue_kiosk_token  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -211,3 +212,45 @@ def other_student_user(db_session):
 @pytest.fixture(scope="function")
 def other_student_token(client, other_student_user):
     return login_and_get_token(client, other_student_user.email, "password123")
+
+
+# ---------------------------------------------------------------------------
+# Kiosk capability tokens
+# ---------------------------------------------------------------------------
+# These mirror what ``POST /tests/{id}/attempts/start`` returns to the
+# WebClient, but are minted directly so individual tests can grab a
+# token without having to drive the full start-attempt flow first.
+@pytest.fixture(scope="function")
+def kiosk_token(sample_test, assigned_attempt):
+    """Capability token bound to ``assigned_attempt`` on ``sample_test``."""
+    return issue_kiosk_token(assigned_attempt, sample_test)
+
+
+@pytest.fixture(scope="function")
+def other_attempt(db_session, sample_test, other_student_user):
+    """A second attempt belonging to a different student on the same test.
+
+    Used to verify that a kiosk token issued for attempt A cannot be
+    used to write to / acknowledge / end attempt B.
+    """
+    assignment = TestAssignment(
+        test_id=sample_test.id, student_id=other_student_user.id
+    )
+    db_session.add(assignment)
+    db_session.commit()
+    db_session.refresh(assignment)
+    attempt = TestAttempt(
+        test_id=sample_test.id,
+        student_id=other_student_user.id,
+        assignment_id=assignment.id,
+        status=AttemptStatus.IN_PROGRESS,
+    )
+    db_session.add(attempt)
+    db_session.commit()
+    db_session.refresh(attempt)
+    return attempt
+
+
+@pytest.fixture(scope="function")
+def other_kiosk_token(sample_test, other_attempt):
+    return issue_kiosk_token(other_attempt, sample_test)
