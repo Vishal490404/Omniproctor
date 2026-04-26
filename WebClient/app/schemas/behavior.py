@@ -35,6 +35,12 @@ class BehaviorEventCreateRequest(BaseModel):
 class BehaviorEventResponse(BaseModel):
     id: int
     attempt_id: int
+    # 1-based sequence among this student's attempts at this test (ordered
+    # by started_at). attempt_id is the global test_attempts PK and is
+    # not user-meaningful - the UI displays attempt_number. Defaults to 1
+    # so older code paths that haven't been updated still produce a sane
+    # value.
+    attempt_number: int = 1
     test_id: int
     student_id: int
     event_type: BehaviorEventType

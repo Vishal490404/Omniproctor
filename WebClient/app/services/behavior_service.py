@@ -9,6 +9,36 @@ from app.models.test_attempt import TestAttempt
 from app.schemas.behavior import BehaviorEventCreateRequest
 
 
+def _attempt_number_map(db: Session, test_id: int, student_id: int) -> dict[int, int]:
+    """Return ``{attempt_id: 1-based sequence}`` for this (test, student).
+
+    Sequence is by ``started_at`` ascending so the candidate's first
+    attempt is #1, second is #2, etc. - independent of the global
+    ``test_attempts.id`` PK.
+    """
+    attempts = (
+        db.query(TestAttempt.id, TestAttempt.started_at)
+        .filter(TestAttempt.test_id == test_id, TestAttempt.student_id == student_id)
+        .order_by(TestAttempt.started_at.asc(), TestAttempt.id.asc())
+        .all()
+    )
+    return {row.id: idx for idx, row in enumerate(attempts, start=1)}
+
+
+def attempt_number_for(db: Session, attempt: TestAttempt) -> int:
+    """1-based sequence for a single attempt (cheap path - just a COUNT)."""
+    earlier = (
+        db.query(TestAttempt.id)
+        .filter(
+            TestAttempt.test_id == attempt.test_id,
+            TestAttempt.student_id == attempt.student_id,
+            TestAttempt.started_at < attempt.started_at,
+        )
+        .count()
+    )
+    return earlier + 1
+
+
 def create_behavior_event(
     db: Session,
     attempt: TestAttempt,
@@ -77,19 +107,46 @@ def create_behavior_events_bulk(
     return len(rows)
 
 
+def _attach_attempt_numbers(
+    events: list[BehaviorEvent], number_by_attempt: dict[int, int]
+) -> list[BehaviorEvent]:
+    """Stamp each ORM event with ``attempt_number`` so Pydantic's
+    ``from_attributes=True`` picks it up in BehaviorEventResponse.
+
+    Attaching as a plain Python attribute is fine - SQLAlchemy doesn't
+    fight us as long as the name isn't a mapped column.
+    """
+    for event in events:
+        event.attempt_number = number_by_attempt.get(event.attempt_id, 1)
+    return events
+
+
 def list_events_for_attempt(db: Session, attempt_id: int) -> list[BehaviorEvent]:
-    return (
+    events = (
         db.query(BehaviorEvent)
         .filter(BehaviorEvent.attempt_id == attempt_id)
         .order_by(BehaviorEvent.event_time.desc(), BehaviorEvent.id.desc())
         .all()
     )
+    if not events:
+        return events
+    # All events in this list share one attempt_id. Use the cheap
+    # single-attempt rank rather than building a full map.
+    first = events[0]
+    attempt = db.query(TestAttempt).filter(TestAttempt.id == first.attempt_id).first()
+    if attempt is not None:
+        number = attempt_number_for(db, attempt)
+        return _attach_attempt_numbers(events, {attempt.id: number})
+    return events
 
 
 def list_events_for_test_student(db: Session, test_id: int, student_id: int) -> list[BehaviorEvent]:
-    return (
+    events = (
         db.query(BehaviorEvent)
         .filter(BehaviorEvent.test_id == test_id, BehaviorEvent.student_id == student_id)
         .order_by(BehaviorEvent.event_time.desc(), BehaviorEvent.id.desc())
         .all()
     )
+    if not events:
+        return events
+    return _attach_attempt_numbers(events, _attempt_number_map(db, test_id, student_id))

@@ -662,7 +662,11 @@ export function BehaviorLogsPage() {
                       </Table.Td>
                       <Table.Td>{severityBadge(event.severity)}</Table.Td>
                       <Table.Td>
-                        <Text size="sm" c="dimmed">#{event.attempt_id}</Text>
+                        <Tooltip label={`test_attempts.id = ${event.attempt_id}`}>
+                          <Text size="sm" c="dimmed">
+                            #{event.attempt_number ?? 1}
+                          </Text>
+                        </Tooltip>
                       </Table.Td>
                       <Table.Td>
                         <Text size="sm" lineClamp={1}>
@@ -740,7 +744,12 @@ export function BehaviorLogsPage() {
                 <Text size="xs" c="dimmed">
                   Attempt
                 </Text>
-                <Text size="sm">#{drawerEvent.attempt_id}</Text>
+                <Text size="sm">
+                  #{drawerEvent.attempt_number ?? 1}{' '}
+                  <Text component="span" c="dimmed" size="xs">
+                    (id {drawerEvent.attempt_id})
+                  </Text>
+                </Text>
                 <Text size="xs" c="dimmed">
                   Event ID
                 </Text>

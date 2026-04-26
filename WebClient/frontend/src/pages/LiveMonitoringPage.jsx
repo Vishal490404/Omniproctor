@@ -616,9 +616,11 @@ export function LiveMonitoringPage() {
           drawerAttempt ? (
             <Group gap="xs">
               <Text fw={600}>{drawerAttempt.student_name}</Text>
-              <Text size="sm" c="dimmed">
-                · attempt #{drawerAttempt.attempt_id}
-              </Text>
+              <Tooltip label={`test_attempts.id = ${drawerAttempt.attempt_id}`}>
+                <Text size="sm" c="dimmed">
+                  · attempt #{drawerAttempt.attempt_number ?? 1}
+                </Text>
+              </Tooltip>
             </Group>
           ) : (
             'Attempt'

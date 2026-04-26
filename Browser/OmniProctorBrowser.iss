@@ -116,21 +116,12 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--register-protocol"; \
     Flags: runhidden waituntilterminated; \
     StatusMsg: "Registering URL protocol..."
 
-; Optional post-install launch (the "Launch OmniProctor Browser" checkbox
-; on the final Setup page). MUST use shellexec because:
-;   * Inno's default is plain CreateProcess for [Run] entries, which
-;     CANNOT trigger UAC. Our EXE has requireAdministrator embedded in
-;     its manifest (uac_admin=True in the .spec), so CreateProcess fails
-;     with `ERROR_ELEVATION_REQUIRED (740)`.
-;   * shellexec routes through ShellExecuteEx, which honors the manifest
-;     and prompts the user for elevation just like a normal Start Menu
-;     launch would.
-;   * runasoriginaluser is the implicit default for `postinstall`
-;     entries - Inno deliberately drops the elevated token before
-;     launching, so the user isn't running with admin rights they didn't
-;     ask for. Combined with shellexec this gives us a clean UAC prompt.
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; \
-    Flags: nowait postinstall skipifsilent shellexec runasoriginaluser
+; NOTE: We deliberately do NOT offer a "Launch OmniProctor Browser"
+; checkbox on the final Setup page. The kiosk has no usable standalone
+; mode - launching it without an `omniproctor-browser://...` URL drops
+; the candidate on the "no test link provided" error screen, which
+; looks like a broken install. The browser is only ever started by the
+; WebClient via the URL protocol handler we just registered above.
 
 [UninstallRun]
 ; Safety net: if the kiosk crashed mid-exam this restores the user's

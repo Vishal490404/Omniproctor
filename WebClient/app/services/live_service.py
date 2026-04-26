@@ -40,6 +40,7 @@ def _build_row(
     db: Session,
     attempt: TestAttempt,
     student: User,
+    attempt_number: int,
 ) -> LiveAttemptRow:
     risk = compute_attempt_risk(db, attempt.id)
 
@@ -106,6 +107,7 @@ def _build_row(
 
     return LiveAttemptRow(
         attempt_id=attempt.id,
+        attempt_number=attempt_number,
         student_id=student.id,
         student_name=student.full_name,
         student_email=student.email,
@@ -152,12 +154,38 @@ def get_live_snapshot(db: Session, test: Test) -> LiveTestSnapshot:
     )
     student_by_id = {s.id: s for s in students}
 
+    # Per-(test, student) attempt sequence so the UI can show "attempt #1"
+    # for a candidate's first try regardless of the global PK. We compute
+    # the full ranking from ALL attempts (not just live ones), then look
+    # up each row by id - one extra query per active student, capped to
+    # the cohort size and well within the 1s cache window.
+    attempt_number_by_id: dict[int, int] = {}
+    for sid in student_ids:
+        ranked = (
+            db.query(TestAttempt.id)
+            .filter(
+                TestAttempt.test_id == test.id,
+                TestAttempt.student_id == sid,
+            )
+            .order_by(TestAttempt.started_at.asc(), TestAttempt.id.asc())
+            .all()
+        )
+        for idx, row in enumerate(ranked, start=1):
+            attempt_number_by_id[row.id] = idx
+
     rows: list[LiveAttemptRow] = []
     for attempt in attempts:
         student = student_by_id.get(attempt.student_id)
         if not student:
             continue
-        rows.append(_build_row(db, attempt, student))
+        rows.append(
+            _build_row(
+                db,
+                attempt,
+                student,
+                attempt_number=attempt_number_by_id.get(attempt.id, 1),
+            )
+        )
 
     # Highest-risk first so the teacher sees who needs attention.
     rows.sort(key=lambda r: (-r.risk_score, r.student_name.lower()))
